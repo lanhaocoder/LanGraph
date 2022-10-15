@@ -26,6 +26,7 @@ int main()
 	handle = tracecmd_open_head("trace.dat", 0);
 	if (handle == NULL) {
 		printf("cannot open trace.dat");
+		return -1;
 	}
 	ret = tracecmd_iterate_events(handle, NULL, 0, print_events, &seq);
 
