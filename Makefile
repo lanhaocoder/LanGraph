@@ -44,7 +44,7 @@ $(TARGETS): $(OBJS)
 	$(CC) $^ -rdynamic -Wl,-rpath=$(libdir) -o $@ $(LDFLAGS) $(CONFIG_LIBS) $(LIBS)
 
 %.o: %.c
-	$(CC) -c $(CFLAGS) $(CFLAGS) $(EXT) -fPIC $< -o $@
+	$(CC) -c $(CFLAGS) $(CFLAGS) $(EXT) -fPIC -O0 -g $< -o $@
 
 all: $(TARGETS)
 
