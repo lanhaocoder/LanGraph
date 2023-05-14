@@ -1,2 +1,40 @@
 # LanGraph
 Latency Graph for linux ftrace scheduler latency analysis,base on trace-cmd.
+
+support evnet:
+
+/sys/kernel/debug/tracing/events/sched/
+sched_kthread_stop
+sched_kthread_stop_ret
+sched_kthread_work_execute_end
+sched_kthread_work_execute_start
+sched_kthread_work_queue_work
+sched_migrate_task
+sched_move_numa
+sched_pi_setprio
+sched_process_exec
+sched_process_exit
+sched_process_fork
+sched_process_free
+sched_process_hang
+sched_process_wait
+sched_stat_blocked
+sched_stat_iowait
+sched_stat_runtime
+sched_stat_sleep
+sched_stat_wait
+sched_stick_numa
+sched_swap_numa
+sched_switch
+sched_wait_task
+sched_wake_idle_without_ipi
+sched_wakeup
+sched_wakeup_new
+sched_waking
+
+/sys/kernel/debug/tracing/events/irq
+irq_handler_entry
+irq_handler_exit
+softirq_entry
+softirq_exit
+softirq_raise

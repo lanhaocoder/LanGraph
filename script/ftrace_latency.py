@@ -6,33 +6,35 @@ Created on Thu Aug 16 00:19:13 2018
 @author: lanhao
 """
 import os
-import urllib.request
 import time
 import threading
 import re
 import pickle
 
-INPUT_FILE_WITH_STACK="trace.data.split.txt"
-OUTPUT_FILE="trace.dat.any.txt"
-INPUT_FILE="trace.dat.txt"
+INPUT_FILE_WITH_STACK="langraph.dat"
+OUTPUT_FILE="langraph.out.txt"
+TRACE_FILE="langraph.trace"
 
-HARD_IRQ = 0
-SOFT_IRQ = 1
-
-IRQ_TID = 0x10000000
-IRQ_UNKOWN_TID = 0x20000000
-INIT_STATUS_TID = 0x30000000
-INIT_STATUS_TID_NAME = "InitStatus"
-SELF_TID = 0x40000000
-SELF_TID_NAME = "Self"
-PID_NAME_SHIFT = 9
-IRQ_HANDLE_TIME = 3000
-
-EVENT_TYPE_RUNNING     = 0
-EVENT_TYPE_PREEMPT     = 1
-EVENT_TYPE_SLEEP       = 2
-EVENT_TYPE_WAKED       = 3
-EVENT_TYPE_WAKING      = 4
+NAME_OFFSET=0
+NAME_START=0
+NAME_SIZE=16
+NAME_END=NAME_START+NAME_SIZE
+TID_OFFSET=1
+TID_START=NAME_END+TID_OFFSET
+TID_SIZE=7
+TID_END=TID_START+TID_SIZE
+PID_OFFSET=2
+PID_START=TID_END+PID_OFFSET
+PID_SIZE=7
+PID_END=PID_START+PID_SIZE
+CPU_OFFSET=3
+CPU_START=PID_END+CPU_OFFSET
+CPU_SIZE=3
+CPU_END=CPU_START+CPU_SIZE
+STATE_OFFSET=2
+STATE_START=CPU_END+STATE_OFFSET
+STATE_SIZE=5
+STATE_END=STATE_START+STATE_SIZE
 
 def save_variable(v,filename):
     f=open(filename,'wb')
@@ -58,6 +60,92 @@ def read_input(filename):
         data.append(line)
     return data
 
+STACK_NAME_INDEX = 1
+STACK_ADDR_INDEX = 2
+def stack_handle(line, priv):
+    key_word = line.split()
+    priv.append([key_word[STACK_NAME_INDEX], key_word[STACK_ADDR_INDEX]])
+
+def null_init(line):
+    return []
+
+def null_handle(line, priv):
+    return
+
+event_type = {
+    "sched_kthread_stop"               : [null_init, null_handle],
+    "sched_kthread_stop_ret"           : [null_init, null_handle],
+    "sched_kthread_work_execute_end"   : [null_init, null_handle],
+    "sched_kthread_work_execute_start" : [null_init, null_handle],
+    "sched_kthread_work_queue_work"    : [null_init, null_handle],
+    "sched_migrate_task"               : [null_init, null_handle],
+    "sched_move_numa"                  : [null_init, null_handle],
+    "sched_pi_setprio"                 : [null_init, null_handle],
+    "sched_process_exec"               : [null_init, null_handle],
+    "sched_process_exit"               : [null_init, null_handle],
+    "sched_process_fork"               : [null_init, null_handle],
+    "sched_process_free"               : [null_init, null_handle],
+    "sched_process_hang"               : [null_init, null_handle],
+    "sched_process_wait"               : [null_init, null_handle],
+    "sched_stat_blocked"               : [null_init, null_handle],
+    "sched_stat_iowait"                : [null_init, null_handle],
+    "sched_stat_runtime"               : [null_init, null_handle],
+    "sched_stat_sleep"                 : [null_init, null_handle],
+    "sched_stat_wait"                  : [null_init, null_handle],
+    "sched_stick_numa"                 : [null_init, null_handle],
+    "sched_swap_numa"                  : [null_init, null_handle],
+    "sched_switch"                     : [null_init, null_handle],
+    "sched_wait_task"                  : [null_init, null_handle],
+    "sched_wake_idle_without_ipi"      : [null_init, null_handle],
+    "sched_wakeup"                     : [null_init, null_handle],
+    "sched_wakeup_new"                 : [null_init, null_handle],
+    "sched_waking"                     : [null_init, null_handle],
+    "<stack trace>"                    : [null_init, stack_handle],
+    "<user stack trace>"               : [null_init, stack_handle]
+}
+
+TRACE_RETURN_TRUE=0
+TRACE_RETURN_FALSE=1
+TRACE_RETURN_STACK=2
+"<...>-154717  ( 154717) [000] d.... 27117.357065: sched_stat_runtime: "
+class trace_event:
+    def __init__(self, line=""):
+        self.available = TRACE_RETURN_TRUE
+        if line.__len__() == 0:
+            self.available = TRACE_RETURN_FALSE
+            return
+        if line[0] == '#':
+            self.available = TRACE_RETURN_FALSE
+            return
+        if line[0:4] == ' => ':
+            if len(line.split()) == 3:
+                self.available = TRACE_RETURN_STACK
+                return
+            else:
+                self.available = TRACE_RETURN_FALSE
+                return
+        self.name  = line[ NAME_START: NAME_END].strip()
+        self.tid   = line[  TID_START:  TID_END].strip()
+        self.pid   = line[  PID_START:  PID_END].strip()
+        self.cpu   = int(line[  CPU_START:  CPU_END].strip())
+        self.state = line[STATE_START:STATE_END].strip()
+        key_word = line[TID_START:-1].split(':')
+        self.timestamp = float(key_word[0].split()[-1])
+        self.event_type_name = key_word[1].strip()
+        if self.event_type_name in event_type:
+            [init_op, handle_op] = event_type[self.event_type_name]
+            self.event_type_priv = init_op(line)
+        else:
+            self.event_type_priv = list()
+    def get_available(self):
+        return self.available
+    def handle(self, line):
+        if self.available != TRACE_RETURN_TRUE:
+            return
+        if self.event_type_name in event_type:
+            [init_op, handle_op] = event_type[self.event_type_name]
+            handle_op(line, self.event_type_priv)
+
 class task_event:
     def __init__(self, timestamp, pid):
         self.pid = pid
@@ -66,205 +154,27 @@ class task_event:
     def set_end_timestamp(self, timestamp):
         self.latency = timestamp - self.timestamp
 
-class task_stat:
-    def __init__(self, pid):
-        self.pid = pid
-        self.event = list()
-
-class task_handle:
-    def __init__(self, timestamp):
-        self.running_status = dict()
-        self.sleep_status = dict()
-        self.timingline = list()
-        self.timingline_stat = list()
-        self.stat_stack = list()
-        self.start_timestamp = timestamp
-        event = task_event(timestamp, INIT_STATUS_TID)
-        self.stat_stack.append(event)
-    def waked_insert(self, timestamp, prev_pid):
-        self.waked_list.append([timestamp, prev_pid])
-        self.timingline.append([timestamp, EVENT_TYPE_WAKED, prev_pid])
-    def waking_insert(self, timestamp, next_pid):
-        self.waking_list.append([timestamp, next_pid])
-        self.timingline.append([timestamp, EVENT_TYPE_WAKING, next_pid])
-    def running_insert(self, timestamp):
-        self.timingline.append([timestamp, EVENT_TYPE_RUNNING, timestamp])
+def get_data(data):
+    data_len = len(data)
+    if data_len == 0:
         return
-    def preempt_insert(self, timestamp):
-        self.timingline.append([timestamp, EVENT_TYPE_PREEMPT, timestamp])
-        return
-    def sleep_insert(self, timestamp):
-        self.timingline.append([timestamp, EVENT_TYPE_SLEEP, timestamp])
-        return
-
-def get_data_old(input_path="trace.dat.txt", output_path="trace.dat.any.txt"):
-    data = read_input(input_path)
-    irq_cpu=dict()
-    task_dict = dict()
-    pid_dict = dict()
-    pid_dict[INIT_STATUS_TID] = INIT_STATUS_TID_NAME
-    pid_dict[SELF_TID] = SELF_TID_NAME
-    subword = data[1][PID_NAME_SHIFT:].split(':')[0].split()
-    start_time=int(re.sub('[\.:]','',subword[-1]))
-    for i in range(1, len(data)):
-        sentence = data[i]  
-        word = sentence[PID_NAME_SHIFT:].split(':')
-        subword=word[0].split()
-        comm = sentence[0:PID_NAME_SHIFT-1].split()[0]
-        pid = int(subword[0].split('-')[-1])
-        timestamp = int(re.sub('[\.:]','',subword[-1]))
-        cpu = int(subword[-2][0])
-        irq_context = subword[-2][3]
-        if "sched_switch" in word[1]:
-            subword = sentence.split("sched_switch:")[1].split('=')
-            next_comm = subword[7].split(' next_pid')[0]
-            pid_stat = subword[4]
-            next_pid = int(subword[8].split(' next_prio')[0])
-            # handle
-            pid_dict[pid] = comm
-            pid_dict[next_pid] = next_comm
-            task_class = task_dict[pid]
-            if task_class is None:
-                task_class = task_handle(start_time)
-                task_dict[pid] = task_class
-            # 执行正常退出
-            if "R" not in pid_stat:
-                task_class.preempt_insert(timestamp)
-            else:
-                task_class.sleep_insert(timestamp)
-            # 被强占，状态不变
-            task_class = task_dict[next_pid]
-            if task_class is None:
-                task_class = task_handle(start_time)
-                task_dict[next_pid] = task_class
-            task_class.running_insert(timestamp)
-        elif "sched_waking" in word[1]:
-            subword = sentence.split("sched_waking:")[1].split('=')
-            next_comm = subword[1].split(' pid')[0]
-            next_pid = int(subword[2].split(' prio')[0])
-            # handle
-            if irq_context != '.':
-                irq_list = irq_cpu[cpu]
-                if irq_list is not None:
-                    [irq_time, irq, irq_name, irq_type] = irq_list[-1]
-                    if timestamp - irq_time < IRQ_HANDLE_TIME:
-                        pid = IRQ_TID + irq
-                        comm = irq_name + 'irq'
-                    else:
-                        pid = IRQ_UNKOWN_TID + pid
-                        comm = next_comm + 'irq'
-                else:
-                    pid = IRQ_UNKOWN_TID + pid
-                    comm = next_comm + 'unkown_irq'
-            pid_dict[pid] = comm
-            pid_dict[next_pid] = next_comm
-            task_class = task_dict[pid]
-            if task_class is None:
-                task_class = task_handle(start_time)
-                task_dict[pid] = task_class
-            task_class.waking_insert(timestamp, next_pid)
-            task_class = task_dict[next_pid]
-            if task_class is None:
-                task_class = task_handle(start_time)
-                task_dict[next_pid] = task_class
-            task_class.waked_insert(timestamp, pid)
-        elif "softirq_entry" in word[1]:
-            irq=int(word[4].split('=')[1])
-            irq_name=word[5].split('=')[1]
-            softirq_list = irq_cpu[cpu]
-            if softirq_list is None:
-                softirq_list = list()
-                irq_cpu[cpu] = softirq_list
-            softirq_list.append([timestamp, irq, irq_name, SOFT_IRQ])
-        elif "irq_handler_entry" in word[1]:
-            irq=int(word[4].split('=')[1])
-            irq_name=word[5].split('=')[1]
-            irq_list = irq_cpu[cpu]
-            if irq_list is None:
-                irq_list = list()
-                irq_cpu[cpu] = irq_list
-            irq_list.append([timestamp, irq, irq_name, HARD_IRQ])
-    save_variable([irq_cpu, task_dict, pid_dict],output_path)
-
-def get_data(input_path="trace.dat.txt", output_path="trace.dat.any.txt"):
-    data = read_input(input_path)
-    for i in range(1, len(data)):
-        sentence = data[i]
-        if "sched_switch" in sentence:
-            stack_flag = 1
+    last_te = trace_event(data[0])
+    te_list=list()
+    for i in range(0, data_len):
+        line = data[i]
+        #print(line)
+        te = trace_event(line)
+        if te.get_available() == TRACE_RETURN_FALSE:
             continue
-        if stack_flag == 1:
-            if "=>" in sentence:
-        if "sched_switch" in word[1]:
-            subword = sentence.split("sched_switch:")[1].split('=')
-            next_comm = subword[7].split(' next_pid')[0]
-            pid_stat = subword[4]
-            next_pid = int(subword[8].split(' next_prio')[0])
-            # handle
-            pid_dict[pid] = comm
-            pid_dict[next_pid] = next_comm
-            task_class = task_dict[pid]
-            if task_class is None:
-                task_class = task_handle(start_time)
-                task_dict[pid] = task_class
-            # 执行正常退出
-            if "R" not in pid_stat:
-                task_class.preempt_insert(timestamp)
-            else:
-                task_class.sleep_insert(timestamp)
-            # 被强占，状态不变
-            task_class = task_dict[next_pid]
-            if task_class is None:
-                task_class = task_handle(start_time)
-                task_dict[next_pid] = task_class
-            task_class.running_insert(timestamp)
-        elif "sched_waking" in word[1]:
-            subword = sentence.split("sched_waking:")[1].split('=')
-            next_comm = subword[1].split(' pid')[0]
-            next_pid = int(subword[2].split(' prio')[0])
-            # handle
-            if irq_context != '.':
-                irq_list = irq_cpu[cpu]
-                if irq_list is not None:
-                    [irq_time, irq, irq_name, irq_type] = irq_list[-1]
-                    if timestamp - irq_time < IRQ_HANDLE_TIME:
-                        pid = IRQ_TID + irq
-                        comm = irq_name + 'irq'
-                    else:
-                        pid = IRQ_UNKOWN_TID + pid
-                        comm = next_comm + 'irq'
-                else:
-                    pid = IRQ_UNKOWN_TID + pid
-                    comm = next_comm + 'unkown_irq'
-            pid_dict[pid] = comm
-            pid_dict[next_pid] = next_comm
-            task_class = task_dict[pid]
-            if task_class is None:
-                task_class = task_handle(start_time)
-                task_dict[pid] = task_class
-            task_class.waking_insert(timestamp, next_pid)
-            task_class = task_dict[next_pid]
-            if task_class is None:
-                task_class = task_handle(start_time)
-                task_dict[next_pid] = task_class
-            task_class.waked_insert(timestamp, pid)
-        elif "softirq_entry" in word[1]:
-            irq=int(word[4].split('=')[1])
-            irq_name=word[5].split('=')[1]
-            softirq_list = irq_cpu[cpu]
-            if softirq_list is None:
-                softirq_list = list()
-                irq_cpu[cpu] = softirq_list
-            softirq_list.append([timestamp, irq, irq_name, SOFT_IRQ])
-        elif "irq_handler_entry" in word[1]:
-            irq=int(word[4].split('=')[1])
-            irq_name=word[5].split('=')[1]
-            irq_list = irq_cpu[cpu]
-            if irq_list is None:
-                irq_list = list()
-                irq_cpu[cpu] = irq_list
-            irq_list.append([timestamp, irq, irq_name, HARD_IRQ])
-    save_variable([irq_cpu, task_dict, pid_dict],output_path)
+        if te.get_available() == TRACE_RETURN_STACK:
+            if last_te.get_available() == TRACE_RETURN_TRUE:
+                last_te.handle(line)
+                continue
+            continue
+        last_te = te
+        te_list.append(te)
+    return te_list
 
 if __name__ == '__main__':
-    get_data(INPUT_FILE_WITH_STACK, OUTPUT_FILE)
+    data = read_input(INPUT_FILE_WITH_STACK)
+    te_list=get_data(data)
