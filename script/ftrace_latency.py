@@ -67,42 +67,88 @@ def stack_handle(line, priv):
     priv.append([key_word[STACK_NAME_INDEX], key_word[STACK_ADDR_INDEX]])
 
 def null_init(line):
-    return []
+    return [line]
 
 def null_handle(line, priv):
     return
 
-event_type = {
-    "sched_kthread_stop"               : [null_init, null_handle],
-    "sched_kthread_stop_ret"           : [null_init, null_handle],
-    "sched_kthread_work_execute_end"   : [null_init, null_handle],
-    "sched_kthread_work_execute_start" : [null_init, null_handle],
-    "sched_kthread_work_queue_work"    : [null_init, null_handle],
-    "sched_migrate_task"               : [null_init, null_handle],
-    "sched_move_numa"                  : [null_init, null_handle],
-    "sched_pi_setprio"                 : [null_init, null_handle],
-    "sched_process_exec"               : [null_init, null_handle],
-    "sched_process_exit"               : [null_init, null_handle],
-    "sched_process_fork"               : [null_init, null_handle],
-    "sched_process_free"               : [null_init, null_handle],
-    "sched_process_hang"               : [null_init, null_handle],
-    "sched_process_wait"               : [null_init, null_handle],
-    "sched_stat_blocked"               : [null_init, null_handle],
-    "sched_stat_iowait"                : [null_init, null_handle],
-    "sched_stat_runtime"               : [null_init, null_handle],
-    "sched_stat_sleep"                 : [null_init, null_handle],
-    "sched_stat_wait"                  : [null_init, null_handle],
-    "sched_stick_numa"                 : [null_init, null_handle],
-    "sched_swap_numa"                  : [null_init, null_handle],
-    "sched_switch"                     : [null_init, null_handle],
-    "sched_wait_task"                  : [null_init, null_handle],
-    "sched_wake_idle_without_ipi"      : [null_init, null_handle],
-    "sched_wakeup"                     : [null_init, null_handle],
-    "sched_wakeup_new"                 : [null_init, null_handle],
-    "sched_waking"                     : [null_init, null_handle],
-    "<stack trace>"                    : [null_init, stack_handle],
-    "<user stack trace>"               : [null_init, stack_handle]
+mod_type = {
+    "sched" : ["sched_kthread_stop",
+        "sched_kthread_stop_ret",
+        "sched_kthread_work_execute_end",
+        "sched_kthread_work_execute_start",
+        "sched_kthread_work_queue_work",
+        "sched_migrate_task",
+        "sched_move_numa",
+        "sched_pi_setprio",
+        "sched_process_exec",
+        "sched_process_exit",
+        "sched_process_fork",
+        "sched_process_free",
+        "sched_process_hang",
+        "sched_process_wait",
+        "sched_stat_blocked",
+        "sched_stat_iowait",
+        "sched_stat_runtime",
+        "sched_stat_sleep",
+        "sched_stat_wait",
+        "sched_stick_numa",
+        "sched_swap_numa",
+        "sched_switch",
+        "sched_wait_task",
+        "sched_wake_idle_without_ipi",
+        "sched_wakeup",
+        "sched_wakeup_new",
+        "sched_waking"],
+	"irq" : ["irq_handler_entry",
+        "irq_handler_exit",
+        "softirq_entry",
+        "softirq_exit",
+        "softirq_raise"],
+	"ftrace" : ["<stack trace>",
+	    "<user stack trace>"]
 }
+
+event_type = {
+    "sched_kthread_stop"               : ["sched",  null_init, null_handle, []],
+    "sched_kthread_stop_ret"           : ["sched",  null_init, null_handle, []],
+    "sched_kthread_work_execute_end"   : ["sched",  null_init, null_handle, []],
+    "sched_kthread_work_execute_start" : ["sched",  null_init, null_handle, []],
+    "sched_kthread_work_queue_work"    : ["sched",  null_init, null_handle, []],
+    "sched_migrate_task"               : ["sched",  null_init, null_handle, []],
+    "sched_move_numa"                  : ["sched",  null_init, null_handle, []],
+    "sched_pi_setprio"                 : ["sched",  null_init, null_handle, []],
+    "sched_process_exec"               : ["sched",  null_init, null_handle, []],
+    "sched_process_exit"               : ["sched",  null_init, null_handle, []],
+    "sched_process_fork"               : ["sched",  null_init, null_handle, []],
+    "sched_process_free"               : ["sched",  null_init, null_handle, []],
+    "sched_process_hang"               : ["sched",  null_init, null_handle, []],
+    "sched_process_wait"               : ["sched",  null_init, null_handle, []],
+    "sched_stat_blocked"               : ["sched",  null_init, null_handle, []],
+    "sched_stat_iowait"                : ["sched",  null_init, null_handle, []],
+    "sched_stat_runtime"               : ["sched",  null_init, null_handle, []],
+    "sched_stat_sleep"                 : ["sched",  null_init, null_handle, []],
+    "sched_stat_wait"                  : ["sched",  null_init, null_handle, []],
+    "sched_stick_numa"                 : ["sched",  null_init, null_handle, []],
+    "sched_swap_numa"                  : ["sched",  null_init, null_handle, []],
+    "sched_switch"                     : ["sched",  null_init, null_handle, []],
+    "sched_wait_task"                  : ["sched",  null_init, null_handle, []],
+    "sched_wake_idle_without_ipi"      : ["sched",  null_init, null_handle, []],
+    "sched_wakeup"                     : ["sched",  null_init, null_handle, []],
+    "sched_wakeup_new"                 : ["sched",  null_init, null_handle, []],
+    "sched_waking"                     : ["sched",  null_init, null_handle, []],
+    "irq_handler_entry"                : ["irq",    null_init, null_handle, []],
+    "irq_handler_exit"                 : ["irq",    null_init, null_handle, []],
+    "softirq_entry"                    : ["irq",    null_init, null_handle, []],
+    "softirq_exit"                     : ["irq",    null_init, null_handle, []],
+    "softirq_raise"                    : ["irq",    null_init, null_handle, []],
+    "<stack trace>"                    : ["ftrace", null_init, stack_handle, []],
+    "<user stack trace>"               : ["ftrace", null_init, stack_handle, []]
+}
+
+def event_type_init():
+    for mod_name, init_op, handle_op, event_type_list in event_type.values():
+        event_type_list.clear()
 
 TRACE_RETURN_TRUE=0
 TRACE_RETURN_FALSE=1
@@ -131,31 +177,26 @@ class trace_event:
         self.state = line[STATE_START:STATE_END].strip()
         key_word = line[TID_START:-1].split(':')
         self.timestamp = float(key_word[0].split()[-1])
-        self.event_type_name = key_word[1].strip()
-        if self.event_type_name in event_type:
-            [init_op, handle_op] = event_type[self.event_type_name]
-            self.event_type_priv = init_op(line)
+        self.event_name = key_word[1].strip()
+        if self.event_name in event_type:
+            [mod_name, init_op, handle_op, event_type_list] = event_type[self.event_name]
+            (start, end) = re.search(self.event_name, line).span()
+            event_type_list.append(self)
+            self.priv = init_op(line[end + 2 : -1])
         else:
-            self.event_type_priv = list()
+            self.priv = list()
     def get_available(self):
         return self.available
     def handle(self, line):
         if self.available != TRACE_RETURN_TRUE:
             return
-        if self.event_type_name in event_type:
-            [init_op, handle_op] = event_type[self.event_type_name]
-            handle_op(line, self.event_type_priv)
+        if self.event_name in event_type:
+            [mod_name, init_op, handle_op, event_type_list] = event_type[self.event_name]
+            handle_op(line, self.priv)
 
-class task_event:
-    def __init__(self, timestamp, pid):
-        self.pid = pid
-        self.timestamp = timestamp
-        self.latency = 0
-    def set_end_timestamp(self, timestamp):
-        self.latency = timestamp - self.timestamp
-
-def get_data(data):
+def parse_data(data):
     data_len = len(data)
+    event_type_init()
     if data_len == 0:
         return
     last_te = trace_event(data[0])
@@ -177,4 +218,4 @@ def get_data(data):
 
 if __name__ == '__main__':
     data = read_input(INPUT_FILE_WITH_STACK)
-    te_list=get_data(data)
+    te_list=parse_data(data)
