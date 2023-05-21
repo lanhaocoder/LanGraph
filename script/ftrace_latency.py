@@ -3,11 +3,8 @@
 """
 Created on Thu Aug 16 00:19:13 2018
 
-@author: lanhao
+@author: Hao Lan
 """
-import os
-import time
-import threading
 import re
 import pickle
 
@@ -36,13 +33,20 @@ STATE_START=CPU_END+STATE_OFFSET
 STATE_SIZE=5
 STATE_END=STATE_START+STATE_SIZE
 
+TRACE_RETURN_TRUE=0
+TRACE_RETURN_FALSE=1
+TRACE_RETURN_STACK=2
+TRACE_STACK_NOT=0
+TRACE_STACK_UNDEF=1
+TRACE_STACK_KERNEL=2
+TRACE_STACK_USER=3
+
 cpu_list={}
 tid_list={}
 pid_tid_list={}
 irq_list={}
 vec_list={}
-cpu_stack_list={}
-tid_stack_list={}
+trace_list=[]
 
 def save_variable(v,filename):
     f=open(filename,'wb')
@@ -104,17 +108,31 @@ event_match={
     "softirq_raise" : re.compile("vec=(\d+) \[action=(\S+)\]")
 }
 
-STACK_NAME_INDEX = 1
-STACK_ADDR_INDEX = 2
 def stack_handle(line, priv):
     key_word = line.split()
-    priv.append([key_word[STACK_NAME_INDEX], key_word[STACK_ADDR_INDEX]])
+    [stack_name_list, stack_addr_list] = priv
+    key_word_len = len(key_word)
+    if key_word_len == 3:
+        stack_name_list.append(key_word[1])
+        stack_addr_list.append(key_word[2])
+    elif key_word_len == 4:
+        stack_name_list.append(key_word[1])
+        stack_addr_list.append(key_word[3])
+    elif key_word_len == 2:
+        stack_name_list.append(key_word[1])
+        stack_addr_list.append(key_word[1])
+    else:
+        print("Error stack "+line)
 
 def null_init(ev):
     return
 
 def stack_init(ev):
-    ev.priv = []
+    ev.priv = [[],[]]
+    if ev.event_name == "<stack trace>":
+        ev.is_stack = TRACE_STACK_KERNEL
+    else:
+        ev.is_stack = TRACE_STACK_USER
     return
 
 def irq_init(ev):
@@ -220,20 +238,23 @@ def event_type_init():
     for mod_name, init_op, handle_op, event_type_list in event_type.values():
         event_type_list.clear()
 
-def event_type_print_priv():
-    for name in event_type:
-        [mod_name, init, handle, ev] = event_type[name]
-        if len(ev) != 0:
-            print(name, ev[0].priv)
-        else:
-            print(name)
-
-TRACE_RETURN_TRUE=0
-TRACE_RETURN_FALSE=1
-TRACE_RETURN_STACK=2
 "<...>-154717  ( 154717) [000] d.... 27117.357065: sched_stat_runtime: "
 class trace_event:
-    def init_common(self):
+    def init_stack(self):
+        if self.cpu not in cpu_list:
+            return
+        else:
+            cpu_ev_list = cpu_list[self.cpu]
+        if len(cpu_ev_list) == 0:
+            return
+        cpu_ev = cpu_ev_list[-1]
+        if self.is_stack == TRACE_STACK_KERNEL:
+            cpu_ev.kernel_stack = self
+        else:
+            cpu_ev.user_stack = self
+        return
+
+    def init_normal(self):
         if self.cpu not in cpu_list:
             cpu_ev_list = []
             cpu_list[self.cpu] = cpu_ev_list
@@ -252,22 +273,31 @@ class trace_event:
         else:
             pid_ev_list = pid_tid_list[self.pid]
         pid_ev_list.add(self.tid)
+        trace_list.append(self)
         return
+    def init_common(self):
+        if self.is_stack != TRACE_STACK_NOT:
+            self.init_stack()
+        else:
+            self.init_normal()
     def __init__(self, line=""):
+        self.raw = line
         self.available = TRACE_RETURN_TRUE
         if line[0:4] == ' => ':
-            if len(line.split()) == 3:
-                self.available = TRACE_RETURN_STACK
-                return
-            else:
-                self.available = TRACE_RETURN_FALSE
-                return
+            self.available = TRACE_RETURN_STACK
+            return
         elif line.__len__() == 0:
             self.available = TRACE_RETURN_FALSE
             return
         elif line[0] == '#':
             self.available = TRACE_RETURN_FALSE
             return
+        self.is_stack = TRACE_STACK_NOT
+        self.kernel_stack = self
+        self.user_stack = self
+        self.kernel_stack_hash = int(0)
+        self.user_stack_hash = int(0)
+        self.stack_hash = int(0)
         self.name  = line[ NAME_START: NAME_END].strip()
         self.tid   = line[  TID_START:  TID_END].strip()
         self.pid   = line[  PID_START:  PID_END].strip()
@@ -319,16 +349,82 @@ def parse_data(data):
         #print(line)
         te = trace_event(line)
         if te.get_available() == TRACE_RETURN_FALSE:
+            print(data[i],"TRACE_RETURN_FALSE")
             continue
         if te.get_available() == TRACE_RETURN_STACK:
             if last_te.get_available() == TRACE_RETURN_TRUE:
                 last_te.handle(line)
                 continue
-            continue
+            else:
+                print(data[i],"TRACE_RETURN_FALSE")
+                continue
         last_te = te
         te_list.append(te)
     return te_list
 
+def event_type_priv_max(event="<user stack trace>"):
+    if event not in event_type:
+        print("Event %s not in event_type." %event)
+        return
+    [name, init_op, handle_op, ev_list] = event_type[event]
+    max_size = 0
+    for ev in ev_list:
+        if max_size < len(ev.priv):
+            max_size = len(ev.priv)
+    print("%s max_size is %d." %(event, max_size))
+
+def event_type_print_priv():
+    for name in event_type:
+        [mod_name, init, handle, ev] = event_type[name]
+        if len(ev) != 0:
+            print(name, ev[0].priv)
+        else:
+            print(name)
+
+def event_check_stack(data, te_list):
+    te_len =len(te_list)
+    for i in range(te_len):
+        if te_list[i].event_name == "<stack trace>" and            te_list[i].event_name != "<user stack trace>":
+            print(te_list[i].timestamp)
+
+def event_state_stat(te_list):
+    te_len =len(te_list)
+    stat_list = {}
+    for i in range(te_len):
+        stat = te_list[i].state
+        if stat in stat_list:
+            stat_list[stat] = stat_list[stat] +1
+        else:
+            stat_list[stat] = 0
+    for s in stat_list:
+        print(s, stat_list[s])
+
+def event_stack_stat(te_list):
+    te_len =len(te_list)
+    stack_stat_list = {}
+    for i in range(te_len):
+        te = te_list[i]
+        stat = te.state
+        if stat[2] != '.':
+            continue
+        hash_id = te.kernel_stack_hash
+        if hash_id in stack_stat_list:
+            [stack, stack_num] = stack_stat_list[hash_id]
+            stack_stat_list[hash_id] = [stack, stack_num + 1]
+        else:
+            stack_stat_list[hash_id] = [te.kernel_stack.priv, 1]
+    for s in stack_stat_list:
+        print(s, stack_stat_list[s][1])
+    return stack_stat_list
+
+def init_trace_stack(trace_list):
+    for te in trace_list:
+        te.kernel_stack_hash = hash(str(te.kernel_stack.priv[0]))
+        te.user_stack_hash = hash(str(te.user_stack.priv[0]))
+        te.stack_hash = hash(str([te.kernel_stack.priv[0],te.user_stack.priv[0]]))
+
 if __name__ == '__main__':
     data = read_input(INPUT_FILE_WITH_STACK)
     te_list=parse_data(data)
+    init_trace_stack(trace_list)
+    event_stack_stat(trace_list)
