@@ -47,6 +47,9 @@ pid_tid_list={}
 irq_list={}
 vec_list={}
 trace_list=[]
+pid_list={}
+te_list=[]
+stack_hash_list = {}
 
 def save_variable(v,filename):
     f=open(filename,'wb')
@@ -337,13 +340,36 @@ class trace_event:
             [mod_name, init_op, handle_op, event_type_list] = event_type[self.event_name]
             handle_op(line, self.priv)
 
+def init_trace_stack():
+    for te in trace_list:
+        te.kernel_stack_hash = hash(str(te.kernel_stack.priv[0]))
+        te.user_stack_hash = hash(str(te.user_stack.priv[0]))
+        te.stack_hash = hash(str([te.kernel_stack.priv[0],te.user_stack.priv[0]]))
+
+def init_pid_event():
+    for pid in pid_tid_list:
+        tid_id_list = pid_tid_list[pid]
+        pid_event_list = []
+        for tid in tid_id_list:
+            pid_event_list.extend(tid_list[tid])
+        pid_event_list.sort(key=lambda x: x.timestamp)
+        pid_list[pid] = pid_event_list
+
+def init_stack_hash():
+    for te in trace_list:
+        hash_id = te.stack_hash
+        if hash_id in stack_hash_list:
+            hash_num = stack_hash_list[hash_id]
+            stack_hash_list[hash_id] = hash_num + 1
+        else:
+            stack_hash_list[hash_id] = 1
+
 def parse_data(data):
     data_len = len(data)
     event_type_init()
     if data_len == 0:
         return
     last_te = trace_event(data[0])
-    te_list=list()
     for i in range(0, data_len):
         line = data[i]
         #print(line)
@@ -360,6 +386,9 @@ def parse_data(data):
                 continue
         last_te = te
         te_list.append(te)
+    init_trace_stack()
+    init_pid_event()
+    init_stack_hash()
     return te_list
 
 def event_type_priv_max(event="<user stack trace>"):
@@ -405,15 +434,9 @@ def event_stack_stat(te_list):
         print(stack_stat_list[s][1], stack_stat_list[s][0][0])
     return stack_stat_list
 
-def init_trace_stack(trace_list):
-    for te in trace_list:
-        te.kernel_stack_hash = hash(str(te.kernel_stack.priv[0]))
-        te.user_stack_hash = hash(str(te.user_stack.priv[0]))
-        te.stack_hash = hash(str([te.kernel_stack.priv[0],te.user_stack.priv[0]]))
-
 def print_all_te(trace_list):
     for te in trace_list:
-        print(te.raw)
+        print('%d\t%08X %s' %(stack_hash_list[te.stack_hash], abs(te.stack_hash), te.raw.strip()))
 
 def print_all_cpu_te(cpu_list):
     for i in range(4):
@@ -424,6 +447,6 @@ def print_all_cpu_te(cpu_list):
 if __name__ == '__main__':
     data = read_input(INPUT_FILE_WITH_STACK)
     te_list=parse_data(data)
-    init_trace_stack(trace_list)
     #event_stack_stat(trace_list)
-    print_all_cpu_te(cpu_list)
+    print_all_te(trace_list)
+    #print_all_cpu_te(cpu_list)
