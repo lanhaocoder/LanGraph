@@ -384,20 +384,8 @@ def event_type_print_priv():
 def event_check_stack(data, te_list):
     te_len =len(te_list)
     for i in range(te_len):
-        if te_list[i].event_name == "<stack trace>" and            te_list[i].event_name != "<user stack trace>":
+        if te_list[i].event_name == "<stack trace>" and te_list[i].event_name != "<user stack trace>":
             print(te_list[i].timestamp)
-
-def event_state_stat(te_list):
-    te_len =len(te_list)
-    stat_list = {}
-    for i in range(te_len):
-        stat = te_list[i].state
-        if stat in stat_list:
-            stat_list[stat] = stat_list[stat] +1
-        else:
-            stat_list[stat] = 0
-    for s in stat_list:
-        print(s, stat_list[s])
 
 def event_stack_stat(te_list):
     te_len =len(te_list)
@@ -414,7 +402,7 @@ def event_stack_stat(te_list):
         else:
             stack_stat_list[hash_id] = [te.kernel_stack.priv, 1]
     for s in stack_stat_list:
-        print(s, stack_stat_list[s][1])
+        print(stack_stat_list[s][1], stack_stat_list[s][0][0])
     return stack_stat_list
 
 def init_trace_stack(trace_list):
@@ -423,8 +411,19 @@ def init_trace_stack(trace_list):
         te.user_stack_hash = hash(str(te.user_stack.priv[0]))
         te.stack_hash = hash(str([te.kernel_stack.priv[0],te.user_stack.priv[0]]))
 
+def print_all_te(trace_list):
+    for te in trace_list:
+        print(te.raw)
+
+def print_all_cpu_te(cpu_list):
+    for i in range(4):
+        trace_list = cpu_list[i]
+        for te in trace_list:
+            print(te.raw.strip())
+
 if __name__ == '__main__':
     data = read_input(INPUT_FILE_WITH_STACK)
     te_list=parse_data(data)
     init_trace_stack(trace_list)
-    event_stack_stat(trace_list)
+    #event_stack_stat(trace_list)
+    print_all_cpu_te(cpu_list)
