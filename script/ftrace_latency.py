@@ -36,6 +36,7 @@ STATE_END=STATE_START+STATE_SIZE
 TRACE_RETURN_TRUE=0
 TRACE_RETURN_FALSE=1
 TRACE_RETURN_STACK=2
+TRACE_RETURN_COMMENT=3
 TRACE_STACK_NOT=0
 TRACE_STACK_UNDEF=1
 TRACE_STACK_KERNEL=2
@@ -50,6 +51,7 @@ trace_list=[]
 pid_list={}
 te_list=[]
 stack_hash_list = {}
+user_symbol_list = {}
 
 def save_variable(v,filename):
     f=open(filename,'wb')
@@ -191,13 +193,13 @@ mod_type = {
         "sched_wakeup",
         "sched_wakeup_new",
         "sched_waking"],
-	"irq" : ["irq_handler_entry",
+    "irq" : ["irq_handler_entry",
         "irq_handler_exit",
         "softirq_entry",
         "softirq_exit",
         "softirq_raise"],
-	"ftrace" : ["<stack trace>",
-	    "<user stack trace>"]
+    "ftrace" : ["<stack trace>",
+        "<user stack trace>"]
 }
 
 event_type = {
@@ -293,7 +295,7 @@ class trace_event:
             self.available = TRACE_RETURN_FALSE
             return
         elif line[0] == '#':
-            self.available = TRACE_RETURN_FALSE
+            self.available = TRACE_RETURN_COMMENT
             return
         self.is_stack = TRACE_STACK_NOT
         self.kernel_stack = self
@@ -364,6 +366,23 @@ def init_stack_hash():
         else:
             stack_hash_list[hash_id] = 1
 
+USER_SYMBOL_EXEC_FILE_INDEX=2
+USER_SYMBOL_ADDR_INDEX=3
+USER_SYMBOL_FUNC_NAME_INDEX=5
+USER_SYMBOL_FILE_LINE_INDEX=7
+USER_SYMBOL_SIZE=8
+def parse_user_symbol(line):
+    word = line.split()
+    if len(word) != USER_SYMBOL_SIZE:
+        return
+    exec_file = word[USER_SYMBOL_EXEC_FILE_INDEX]
+    function_addr = word[USER_SYMBOL_ADDR_INDEX]
+    function_name = word[USER_SYMBOL_FUNC_NAME_INDEX]
+    if "??" in function_name:
+        function_name = "user_symbol_" + exec_file.split('/')[-1]
+    user_symbol_index="%s[+%s]" %(exec_file, function_addr)
+    user_symbol_list[user_symbol_index] = [function_name, function_addr]
+
 def parse_data(data):
     data_len = len(data)
     event_type_init()
@@ -376,6 +395,10 @@ def parse_data(data):
         te = trace_event(line)
         if te.get_available() == TRACE_RETURN_FALSE:
             print(data[i],"TRACE_RETURN_FALSE")
+            continue
+        if te.get_available() == TRACE_RETURN_COMMENT:
+            if "# user_symbol:" in line:
+                parse_user_symbol(line)
             continue
         if te.get_available() == TRACE_RETURN_STACK:
             if last_te.get_available() == TRACE_RETURN_TRUE:
@@ -436,7 +459,19 @@ def event_stack_stat(te_list):
 
 def print_all_te(trace_list):
     for te in trace_list:
-        print('%d\t%08X %s' %(stack_hash_list[te.stack_hash], abs(te.stack_hash), te.raw.strip()))
+        print('%d\t%08X %s %s|%s' %(stack_hash_list[te.stack_hash], abs(te.stack_hash), te.raw.strip(), te.kernel_stack.priv[0], te.user_stack.priv[0]))
+
+def print_all_te_irq(trace_list):
+    for te in trace_list:
+        if type(te.kernel_stack.priv[0])==list:
+            te.kernel_stack.priv[0].reverse()
+        if type(te.user_stack.priv[0])==list:
+            te.user_stack.priv[0].reverse()
+        print('%s\t%s\t%s\t%d, %s, %s' %(te.state, te.event_name, te.tid, te.cpu, te.kernel_stack.priv[0], te.user_stack.priv[0]))
+        if type(te.kernel_stack.priv[0])==list:
+            te.kernel_stack.priv[0].reverse()
+        if type(te.user_stack.priv[0])==list:
+            te.user_stack.priv[0].reverse()
 
 def print_all_cpu_te(cpu_list):
     for i in range(4):
@@ -444,9 +479,55 @@ def print_all_cpu_te(cpu_list):
         for te in trace_list:
             print(te.raw.strip())
 
+"""
+iperf  8366 [000]  1419.092642:    1000000 cpu-clock:pppH:
+        ffffffff9286ee22 check_stack_object+0x82 ([kernel.kallsyms])
+        ffffffff9286f233 __check_object_size+0x23 ([kernel.kallsyms])
+        ffffffff931852db simple_copy_to_iter+0x2b ([kernel.kallsyms])
+        ffffffff93185398 __skb_datagram_iter+0x78 ([kernel.kallsyms])
+        ffffffff931856c8 skb_copy_datagram_iter+0x38 ([kernel.kallsyms])
+        ffffffff93285f9e tcp_recvmsg_locked+0x2ae ([kernel.kallsyms])
+        ffffffff932873b2 tcp_recvmsg+0x72 ([kernel.kallsyms])
+        ffffffff932cc4b4 inet_recvmsg+0x54 ([kernel.kallsyms])
+        ffffffff931690b1 sock_recvmsg+0x81 ([kernel.kallsyms])
+        ffffffff9316be87 __sys_recvfrom+0xb7 ([kernel.kallsyms])
+        ffffffff9316bf44 __x64_sys_recvfrom+0x24 ([kernel.kallsyms])
+        ffffffff9348c1ac do_syscall_64+0x5c ([kernel.kallsyms])
+        ffffffff936000aa entry_SYSCALL_64_after_hwframe+0x72 ([kernel.kallsyms])
+                  12786e __libc_recv+0x6e (/usr/lib/x86_64-linux-gnu/libc.so.6)
+                  12786e __libc_recv+0x6e (/usr/lib/x86_64-linux-gnu/libc.so.6)
+                    cd86 [unknown] (/usr/bin/iperf)
+                   25154 [unknown] (/usr/bin/iperf)
+                   94b42 start_thread+0x2f2 (/usr/lib/x86_64-linux-gnu/libc.so.6)
+                  1269ff __clone3+0x2f (inlined)
+
+"""
+def print_perf_te(te):
+    if te.pid == "-------":
+        print('%s\t0\t[00%d]\t%0.06f:\t1000\t%s:' %(te.name, te.cpu, te.timestamp, te.event_name))
+    else:
+        print('%s\t%s\t[00%d]\t%0.06f:\t1000\t%s:' %(te.name, te.pid, te.cpu, te.timestamp, te.event_name))
+    if type(te.kernel_stack.priv[0])==list:
+        for i in range(len(te.kernel_stack.priv[0])):
+            stack=te.kernel_stack.priv[0][i]
+            addr=te.kernel_stack.priv[1][i]
+            print("\t%s %s ([kernel.kallsyms])" %(addr.strip('<').strip('>'), stack))
+    if type(te.user_stack.priv[0])==list:
+        for i in range(len(te.user_stack.priv[0])):
+            stack=te.user_stack.priv[0][i]
+            addr=te.user_stack.priv[1][i]
+            print("\t%s %s (%s)" %(addr.strip('<').strip('>'), stack, te.name))
+    print("")
+
+def print_perf():
+    for te in trace_list:
+        print_perf_te(te)
+
 if __name__ == '__main__':
     data = read_input(INPUT_FILE_WITH_STACK)
     te_list=parse_data(data)
     #event_stack_stat(trace_list)
-    print_all_te(trace_list)
+    #print_all_te(trace_list)
+    #print_all_te_irq(trace_list)
     #print_all_cpu_te(cpu_list)
+    print_perf()

@@ -7,6 +7,7 @@ buffer_size=65536
 stacktrace=1
 tgid=1
 gzip=1
+user_symbol=1
 events="sched|irq"
 clock="perf"
 interval=1000000
@@ -130,7 +131,7 @@ init_optione()
     echo $events | awk -F"|" '{
         for(i=1;i<=NF;i++)
         {
-            if (system("test  -f "$1"/enable") == 0)
+            if (system("test -f "$1"/enable") == 0)
                 system("echo 1 > "$i"/enable");
             else
                 print $i " not exist"
@@ -168,8 +169,7 @@ start_perf()
         call_graph="fs"
     fi
 
-    perf record -D -1 -a               \
-                -g --call-graph=$call_graph -F 1000 \
+    perf record -a -g --call-graph=$call_graph -F 1000 -m 128M \
                 -- sleep `expr $capture_time + 5` &
 }
 
@@ -219,7 +219,7 @@ get_user_symbol()
         if ($2 !~ ">")
             if (system("test  -f "$2" ") == 0) {
                 system("echo -n \"# user_symbol: "$2" "$3" \" >> ""'$output'");
-                system("addr2line -p -f -e "$2" -a "$3" >> ""'$output'");
+                system("addr2line -i -p -f -e "$2" -a "$3" >> ""'$output'");
             }
     }';
     done
@@ -227,11 +227,16 @@ get_user_symbol()
 
 save_result()
 {
+    trap : INT HUP QUIT TERM
+
     echo "Saving results, please wait"
     echo 0 > $tracefs_path/tracing_on
     cp $tracefs_path/trace $output
 
-    get_user_symbol
+    if [ $user_symbol -eq 1 ]
+    then
+        get_user_symbol
+    fi
 
     if [ $useperf -eq 1 ]
     then
@@ -248,9 +253,6 @@ help_handle()
     cat << EOF
 usage : -t <time in second> capture time default=60
         -o <output> output path default=langraph.dat
-        -m <size_kb> ftrace buffer size per cpu in kb default=65536
-        -s <enable> enable stacktrace default=1
-        -t <enable> format with tgid default=1
         -z <enable> output will gzip default=1
         -e <events> trace events default=sched|irq
            available events in $tracefs_path/available_events
@@ -258,18 +260,15 @@ usage : -t <time in second> capture time default=60
            if use subevent use '/' as a separator
            for example: sched/sched_wakeup|sched/sched_waking|irq
            means sched/sched_wakeup and sched/sched_waking and irq
-        -c <clock> clock source default=perf
-           available type in $tracefs_path/trace_clock
-           local global counter uptime perf
         -p <enable> use perf in the same time default=0
-        -i <time in second> save buffer interval default=1000000
+        -y <enable> use ftrace user space symbol default=1
         -h help
         -v version
 EOF
         exit 0
 }
 
-while getopts "t:o:m:s:T:z:e:c:i:p:hv" opt
+while getopts "t:o:m:s:T:z:e:c:i:p:y:hv" opt
 do
     case $opt in
         t)
@@ -302,6 +301,9 @@ do
         i)
             interval=$OPTARG
             ;;
+        y)
+            user_symbol=$OPTARG
+            ;;
         h)
             help_handle
             ;;
@@ -314,9 +316,7 @@ do
         exit 1;;
 esac done
 
-trap "save_result" 2
-trap "save_result" 5
-trap "save_result" 9
+trap "save_result" INT HUP QUIT TERM
 
 init_ftrace
 init_optione
