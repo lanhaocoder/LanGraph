@@ -2,7 +2,7 @@
 
 VERSION=0.1
 capture_time=60
-output="langraph.dat"
+output="langraph"
 buffer_size=65536
 stacktrace=1
 tgid=1
@@ -13,6 +13,10 @@ clock="perf"
 interval=1000000
 useperf=0
 tracefs_path=`mount|grep tracefs|head -n 1|awk '{print $3}'`
+ftrace_output_name="ftrace.log"
+perf_output_name="perf.log"
+freq=100
+currunt_path=$(pwd)
 
 def_ftrace_opt="annotate           1
     bin                0
@@ -69,7 +73,6 @@ def_ftrace="buffer_size_kb      65536
 
 init_ftrace()
 {
-    currunt_path=`pwd`
     cd $tracefs_path/options
     echo "$def_ftrace_opt" | while read -r line;
     do
@@ -162,15 +165,19 @@ start_perf()
         echo "not exist perf, not get perf"
         return 0
     fi
-    if [[ "`uname -a`" =~ "86" ]]
-    then
-        call_graph="dwarf"
-    else
-        call_graph="fs"
-    fi
-
-    perf record -a -g --call-graph=$call_graph -F 1000 -m 128M \
+    case "`uname -a`" in
+        *x86*)
+            call_graph="dwarf"
+            ;;
+        *)
+            call_graph="fp"
+            ;;
+    esac
+    cd $currunt_path
+    cd $output
+    perf record -a -g --call-graph=$call_graph -F $freq -m 128M \
                 -- sleep `expr $capture_time + 5` &
+    cd $currunt_path
 }
 
 save_perf()
@@ -181,14 +188,10 @@ save_perf()
         echo "not exist perf, not get perf"
         return 0
     fi
-    if [[ "`uname -a`" =~ "86" ]]
-    then
-        call_graph="dwarf"
-    else
-        call_graph="fs"
-    fi
-
-    perf script -F comm,pid,tid,cpu,flags,time,event,ip,sym,dso,trace,symoff,dso,ipc > $output.perf.log
+    cd $currunt_path
+    cd $output
+    perf script -F comm,pid,tid,cpu,flags,time,event,ip,sym,dso,trace,symoff,dso,ipc > $perf_output_name
+    cd $currunt_path
 }
 start_capture()
 {
@@ -210,16 +213,17 @@ get_user_symbol()
         echo "not exist addr2line, not get user symbol"
         return 0
     fi
+    cd $currunt_path
     echo "Get user symbol start..."
-    result=`grep "^ => " $output |sort|uniq`
+    result=`grep "^ => " $output/$ftrace_output_name |sort|uniq`
     echo "$result" |sed 's/\[/ /'|sed 's/+/ /'|sed 's/\]/ /'|while read -r line;
     do
     echo $line | awk '{
     if ($3 !~ "/")
         if ($2 !~ ">")
             if (system("test  -f "$2" ") == 0) {
-                system("echo -n \"# user_symbol: "$2" "$3" \" >> ""'$output'");
-                system("addr2line -i -p -f -e "$2" -a "$3" >> ""'$output'");
+                system("echo -n \"# user_symbol: "$2" "$3" \" >> ""'$output'""/""'$ftrace_output_name'");
+                system("addr2line -i -p -f -e "$2" -a "$3" >> ""'$output'""/""'$ftrace_output_name'");
             }
     }';
     done
@@ -231,7 +235,8 @@ save_result()
 
     echo "Saving results, please wait"
     echo 0 > $tracefs_path/tracing_on
-    cp $tracefs_path/trace $output
+    cd $currunt_path
+    cp $tracefs_path/trace $output/$ftrace_output_name
 
     if [ $user_symbol -eq 1 ]
     then
@@ -245,14 +250,19 @@ save_result()
 
     if [ $gzip -eq 1 ]
     then
-        gzip -f $output
+        cd `dirname $output`
+        tar -zcf `basename $output`.tar.gz `basename $output`
+        echo "result is `realpath $output.tar.gz`"
+    else
+        echo "result is `realpath $output`"
     fi
 }
+
 help_handle()
 {
     cat << EOF
 usage : -t <time in second> capture time default=60
-        -o <output> output path default=langraph.dat
+        -o <output> output directory path default=langraph
         -z <enable> output will gzip default=1
         -e <events> trace events default=sched|irq
            available events in $tracefs_path/available_events
@@ -317,6 +327,17 @@ do
 esac done
 
 trap "save_result" INT HUP QUIT TERM
+
+output_full=`realpath $output`
+
+if [ -n "`mount | grep tmpfs | grep \"$output_full\"`" ]
+then
+    echo $output_full had mounted
+else
+    mkdir -p $output
+    mount -t tmpfs nodev $output
+fi
+
 
 init_ftrace
 init_optione
