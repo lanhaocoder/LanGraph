@@ -328,16 +328,20 @@ esac done
 
 trap "save_result" INT HUP QUIT TERM
 
-output_full=`realpath $output`
-
-if [ -n "`mount | grep tmpfs | grep \"$output_full\"`" ]
+if [ -d $output ]
 then
-    echo $output_full had mounted
+    output_full=`realpath $output`
+    if [ -n "`mount | grep tmpfs | grep \"$output_full\"`" ]
+    then
+        echo $output_full had mounted
+    else
+        mkdir -p $output
+        mount -t tmpfs nodev $output
+    fi
 else
     mkdir -p $output
     mount -t tmpfs nodev $output
 fi
-
 
 init_ftrace
 init_optione
