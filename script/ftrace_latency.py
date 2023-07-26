@@ -303,6 +303,10 @@ class trace_event:
         self.kernel_stack_hash = int(0)
         self.user_stack_hash = int(0)
         self.stack_hash = int(0)
+        self.cpu_delay = int(-1)
+        self.tid_delay = int(-1)
+        self.cpu_index = int(-1)
+        self.tid_index = int(-1)
         self.name  = line[ NAME_START: NAME_END].strip()
         self.tid   = line[  TID_START:  TID_END].strip()
         self.pid   = line[  PID_START:  PID_END].strip()
@@ -383,6 +387,34 @@ def parse_user_symbol(line):
     user_symbol_index="%s[+%s]" %(exec_file, function_addr)
     user_symbol_list[user_symbol_index] = [function_name, function_addr]
 
+def parse_cpu_delay():
+    for i in range(cpu_list):
+        trace_list = cpu_list[i]
+        index = 0
+        timestamp = 0
+        for te in trace_list:
+            te.cpu_index = index
+            te.cpu_delay = te.timestamp - timestamp
+            index = index + 1
+            timestamp = te.timestamp
+        trace_list[0].cpu_delay = 0
+
+def parse_tid_delay():
+    for i in range(tid_list):
+        trace_list = tid_list[i]
+        index = 0
+        timestamp = 0
+        for te in trace_list:
+            te.tid_index = index
+            te.tid_delay = te.timestamp - timestamp
+            index = index + 1
+            timestamp = te.timestamp
+        trace_list[0].tid_delay = 0
+
+def parse_delay():
+    parse_cpu_delay()
+    parse_tid_delay()
+
 def parse_data(data):
     data_len = len(data)
     event_type_init()
@@ -412,6 +444,7 @@ def parse_data(data):
     init_trace_stack()
     init_pid_event()
     init_stack_hash()
+    parse_delay()
     return te_list
 
 def event_type_priv_max(event="<user stack trace>"):
