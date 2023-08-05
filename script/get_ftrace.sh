@@ -6,17 +6,28 @@ output="langraph"
 buffer_size=65536
 stacktrace=1
 tgid=1
-gzip=1
+gzip=0
 user_symbol=1
 events="sched|irq"
 clock="perf"
 interval=1000000
 useperf=0
-tracefs_path=`mount|grep tracefs|head -n 1|awk '{print $3}'`
+useftrace=1
 ftrace_output_name="ftrace.log"
 perf_output_name="perf.log"
 freq=100
 currunt_path=$(pwd)
+if [ -d "/sys/kernel/debug/tracing" ]
+then
+    tracefs_path="/sys/kernel/debug/tracing"
+else
+    tracefs_path=`mount|grep debugfs|head -n 1|awk '{print $3}'`/tracing
+    if [ -d $tracefs_path ]
+    then
+        useftrace=0
+        echo "cannot found ftrace path, disable ftrace capture"
+    fi
+fi
 
 def_ftrace_opt="annotate           1
     bin                0
@@ -71,41 +82,7 @@ def_ftrace="buffer_size_kb      65536
     tracing_on          0
     trace"
 
-init_ftrace()
-{
-    cd $tracefs_path/options
-    echo "$def_ftrace_opt" | while read -r line;
-    do
-    echo $line | awk '{
-    if (system("test  -f "$1" ") == 0)
-        system("echo "$2" > "$1);
-    else
-        print "'$tracefs_path'""/options/"$1" not exit"
-    }';
-    done
-
-    cd $tracefs_path
-    echo "$def_ftrace" | while read -r line;
-    do
-    echo $line | awk '{
-    if (system("test  -f "$1" ") == 0)
-        system("echo "$2" > "$1);
-    else
-        print "'$tracefs_path'""/options/"$1" not exit"
-    }';
-    done
-    if [ -f /proc/sys/kernel/ftrace_enabled ]
-    then
-        echo 1 > /proc/sys/kernel/ftrace_enabled
-    fi
-    if [ -f /proc/sys/kernel/kptr_restrict ]
-    then
-        echo 1 > /proc/sys/kernel/kptr_restrict
-    fi
-    cd $currunt_path
-}
-
-init_optione()
+init_ftrace_optione()
 {
     echo $buffer_size > $tracefs_path/buffer_size_kb
     echo $clock > $tracefs_path/trace_clock
@@ -145,6 +122,41 @@ init_optione()
     echo > $tracefs_path/trace
 }
 
+init_ftrace()
+{
+    cd $tracefs_path/options
+    echo "$def_ftrace_opt" | while read -r line;
+    do
+    echo $line | awk '{
+    if (system("test  -f "$1" ") == 0)
+        system("echo "$2" > "$1);
+    else
+        print "'$tracefs_path'""/options/"$1" not exit"
+    }';
+    done
+
+    cd $tracefs_path
+    echo "$def_ftrace" | while read -r line;
+    do
+    echo $line | awk '{
+    if (system("test  -f "$1" ") == 0)
+        system("echo "$2" > "$1);
+    else
+        print "'$tracefs_path'""/options/"$1" not exit"
+    }';
+    done
+    if [ -f /proc/sys/kernel/ftrace_enabled ]
+    then
+        echo 1 > /proc/sys/kernel/ftrace_enabled
+    fi
+    if [ -f /proc/sys/kernel/kptr_restrict ]
+    then
+        echo 1 > /proc/sys/kernel/kptr_restrict
+    fi
+    cd $currunt_path
+    init_ftrace_optione
+}
+
 is_cmd_exist()
 {
     local cmd="$1"
@@ -155,29 +167,6 @@ is_cmd_exist()
     fi
 
     return 2
-}
-
-start_perf()
-{
-    is_cmd_exist perf
-    if [ $? -ne 0 ]
-    then
-        echo "not exist perf, not get perf"
-        return 0
-    fi
-    case "`uname -a`" in
-        *x86*)
-            call_graph="dwarf"
-            ;;
-        *)
-            call_graph="fp"
-            ;;
-    esac
-    cd $currunt_path
-    cd $output
-    perf record -a -g --call-graph=$call_graph -F $freq -m 128M \
-                -- sleep `expr $capture_time + 5` &
-    cd $currunt_path
 }
 
 save_perf()
@@ -192,17 +181,6 @@ save_perf()
     cd $output
     perf script -F comm,pid,tid,cpu,flags,time,event,ip,sym,dso,trace,symoff,dso,ipc > $perf_output_name
     cd $currunt_path
-}
-start_capture()
-{
-    if [ $useperf -eq 1 ]
-    then
-        start_perf
-    fi
-    echo 1 > $tracefs_path/tracing_on
-    echo "Capture for "$capture_time" seconds start."
-    echo "Enter Ctrl+C to stop capture..."
-    sleep $capture_time
 }
 
 get_user_symbol()
@@ -248,6 +226,11 @@ save_result()
         save_perf
     fi
 
+    if [ $useperf -eq 1 ]
+    then
+        save_perf
+    fi
+
     if [ $gzip -eq 1 ]
     then
         cd `dirname $output`
@@ -256,6 +239,54 @@ save_result()
     else
         echo "result is `realpath $output`"
     fi
+}
+
+start_perf()
+{
+    is_cmd_exist perf
+    if [ $? -ne 0 ]
+    then
+        echo "not exist perf, not get perf"
+        return 0
+    fi
+    echo "start perf capture"
+    case "`uname -a`" in
+        *x86*)
+            call_graph="dwarf"
+            ;;
+        *)
+            call_graph="fp"
+            ;;
+    esac
+    cd $currunt_path
+    cd $output
+    perf record -a -g --call-graph=$call_graph -F $freq -m 128M \
+                -- sleep `expr $capture_time + 5` &
+    cd $currunt_path
+}
+
+start_ftrace()
+{
+    echo "start ftrace capture"
+    init_ftrace
+    echo 1 > $tracefs_path/tracing_on
+}
+
+start_capture()
+{
+    if [ $useperf -eq 1 ]
+    then
+        start_perf
+    fi
+    if [ $useftrace -eq 1 ]
+    then
+        start_ftrace
+    fi
+    echo "Capture for "$capture_time" seconds start."
+    echo "Enter Ctrl+C to stop capture..."
+    trap "save_result" INT HUP QUIT TERM
+    sleep $capture_time
+    trap : INT HUP QUIT TERM
 }
 
 help_handle()
@@ -326,8 +357,6 @@ do
         exit 1;;
 esac done
 
-trap "save_result" INT HUP QUIT TERM
-
 if [ -d $output ]
 then
     output_full=`realpath $output`
@@ -343,7 +372,5 @@ else
     mount -t tmpfs nodev $output
 fi
 
-init_ftrace
-init_optione
 start_capture
 save_result
