@@ -14,8 +14,10 @@ interval=1000000
 useperf=0
 useftrace=1
 ftrace_output_name="ftrace.log"
+ftrace_symbol_output_name="ftrace_symbol.log"
+ftrace_format_output_name="ftrace_format.log"
 perf_output_name="perf.log"
-freq=100
+freq=1000
 currunt_path=$(pwd)
 if [ -d "/sys/kernel/debug/tracing" ]
 then
@@ -183,7 +185,7 @@ save_perf()
     cd $currunt_path
 }
 
-get_user_symbol()
+ftrace_get_user_symbol()
 {
     is_cmd_exist addr2line
     if [ $? -ne 0 ]
@@ -192,19 +194,55 @@ get_user_symbol()
         return 0
     fi
     cd $currunt_path
-    echo "Get user symbol start..."
+    echo "Get ftrace user symbol start..."
     result=`grep "^ => " $output/$ftrace_output_name |sort|uniq`
     echo "$result" |sed 's/\[/ /'|sed 's/+/ /'|sed 's/\]/ /'|while read -r line;
     do
     echo $line | awk '{
     if ($3 !~ "/")
         if ($2 !~ ">")
-            if (system("test  -f "$2" ") == 0) {
-                system("echo -n \"# user_symbol: "$2" "$3" \" >> ""'$output'""/""'$ftrace_output_name'");
-                system("addr2line -i -p -f -e "$2" -a "$3" >> ""'$output'""/""'$ftrace_output_name'");
+            if (system("test -f "$2" ") == 0) {
+                system("echo -n \"# user_symbol: "$2" "$3" \" >> ""'$output'""/""'$ftrace_symbol_output_name'");
+                system("addr2line -i -p -f -e "$2" -a "$3" >> ""'$output'""/""'$ftrace_symbol_output_name'");
             }
     }';
     done
+}
+
+ftrace_get_event_format()
+{
+    echo $tracefs_path/events/ > $output/$ftrace_format_output_name
+    echo "Get ftrace format start..."
+    for event in `echo $events|sed 's/|/ /'`
+    do
+        if [ -d $tracefs_path/events/$event ]
+        then
+            result=`find $tracefs_path/events/$event -name format`
+            echo "$result" | sed 's/\/\//\//' | while read -r line;
+            do
+                echo $line >> $output/$ftrace_format_output_name
+                cat $line >> $output/$ftrace_format_output_name
+            done
+        else
+            echo $tracefs_path/events/$event  not exist
+        fi
+    done
+}
+
+save_ftrace()
+{
+    echo 0 > $tracefs_path/tracing_on
+    echo "save ftrace start"
+
+    cd $currunt_path
+    cp $tracefs_path/trace $output/$ftrace_output_name
+
+    ftrace_get_event_format
+
+    if [ $user_symbol -eq 1 ]
+    then
+        ftrace_get_user_symbol
+    fi
 }
 
 save_result()
@@ -212,18 +250,10 @@ save_result()
     trap : INT HUP QUIT TERM
 
     echo "Saving results, please wait"
-    echo 0 > $tracefs_path/tracing_on
-    cd $currunt_path
-    cp $tracefs_path/trace $output/$ftrace_output_name
 
-    if [ $user_symbol -eq 1 ]
+    if [ $useftrace -eq 1 ]
     then
-        get_user_symbol
-    fi
-
-    if [ $useperf -eq 1 ]
-    then
-        save_perf
+        save_ftrace
     fi
 
     if [ $useperf -eq 1 ]
