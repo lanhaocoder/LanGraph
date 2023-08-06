@@ -573,6 +573,28 @@ def parse_delay():
     parse_cpu_delay()
     parse_tid_delay()
 
+def init_list(ls):
+    if type(ls) != dict:
+        return
+    for evlist in ls.values():
+        if type(evlist) == list:
+            evlist.sort(key=lambda x: x.timestamp)
+
+def init_global():
+    global timestamp_start
+    global timestamp_end
+    trace_list.sort(key=lambda x: x.timestamp)
+    init_list(cpu_list)
+    init_list(irq_list)
+    init_list(tid_list)
+    init_list(vec_list)
+    init_trace_stack()
+    init_pid_event()
+    init_stack_hash()
+    timestamp_start = trace_list[0].timestamp
+    timestamp_end = trace_list[-1].timestamp
+    parse_delay()
+
 def parse_data(data, format_type=TRACE_FORMAT_TYPE_FTRACE):
     data_len = len(data)
     event_type_init()
@@ -614,13 +636,31 @@ def parse_perf_json(input_filename=INPUT_PERF_JSON):
     del json_data
     return te_list
 
-def init_list():
-    init_trace_stack()
-    init_pid_event()
-    init_stack_hash()
-    timestamp_start = trace_list[0].timestamp
-    timestamp_end = trace_list[-1].timestamp
-    parse_delay()
+def reset_resource():
+    global cpu_list
+    global tid_list
+    global pid_tid_list
+    global irq_list
+    global vec_list
+    global trace_list
+    global pid_list
+    global te_list
+    global stack_hash_list
+    global user_symbol_list
+    global timestamp_start
+    global timestamp_end
+    cpu_list={}
+    tid_list={}
+    pid_tid_list={}
+    irq_list={}
+    vec_list={}
+    trace_list=[]
+    pid_list={}
+    te_list=[]
+    stack_hash_list = {}
+    user_symbol_list = {}
+    timestamp_start=-1.0
+    timestamp_end=-1.0
 
 def event_type_priv_max(event="<user stack trace>"):
     if event not in event_type:
@@ -735,6 +775,7 @@ if __name__ == '__main__':
     te_list=parse_data(data, format_type=TRACE_FORMAT_TYPE_FTRACE)
     data = read_input(INPUT_PERF_SCRIPT)
     te_list=parse_data(data, format_type=TRACE_FORMAT_TYPE_PERF_SCRIPT)
+    init_global()
     #event_stack_stat(trace_list)
     #print_all_te(trace_list)
     #print_all_te_irq(trace_list)
