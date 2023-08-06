@@ -7,9 +7,15 @@ Created on Thu Aug 16 00:19:13 2018
 """
 import re
 import pickle
+import json
 
-INPUT_FILE_WITH_STACK="langraph.dat"
-OUTPUT_FILE="langraph.out.txt"
+INPUT_FTRACE_FILE="langraph/ftrace.log"
+INPUT_FTRACE_SYMBOL_FILE="langraph/ftrace_symbol.log"
+INPUT_FTRACE_FORMAT_FILE="langraph/ftrace_format.log"
+INPUT_PERF_JSON="langraph/perf.data.json"
+INPUT_PERF_SCRIPT="langraph/perf.log"
+
+OUTPUT_FILE="langraph.out.json"
 TRACE_FILE="langraph.trace"
 
 NAME_OFFSET=0
@@ -42,6 +48,18 @@ TRACE_STACK_UNDEF=1
 TRACE_STACK_KERNEL=2
 TRACE_STACK_USER=3
 
+TRACE_FORMAT_TYPE_FTRACE=0
+TRACE_FORMAT_TYPE_PERF_JSON=1
+TRACE_FORMAT_TYPE_PERF_SCRIPT=2
+
+PERF_NAME_INDEX=0
+PERF_TID_INDEX=2
+PERF_PID_INDEX=1
+PERF_CPU_INDEX=3
+PERF_TIMESTAMP_INDEX=4
+PERF_EVENT_INDEX=5
+PERF_SUBEVENT_INDEX=6
+
 cpu_list={}
 tid_list={}
 pid_tid_list={}
@@ -52,6 +70,8 @@ pid_list={}
 te_list=[]
 stack_hash_list = {}
 user_symbol_list = {}
+timestamp_start=-1.0
+timestamp_end=-1.0
 
 def save_variable(v,filename):
     f=open(filename,'wb')
@@ -110,7 +130,8 @@ event_match={
     "irq_handler_exit" : re.compile("irq=(\d+) ret=(\S+)"),
     "softirq_entry" : re.compile("vec=(\d+) \[action=(\S+)\]"),
     "softirq_exit" : re.compile("vec=(\d+) \[action=(\S+)\]"),
-    "softirq_raise" : re.compile("vec=(\d+) \[action=(\S+)\]")
+    "softirq_raise" : re.compile("vec=(\d+) \[action=(\S+)\]"),
+    "perf" : re.compile("(\S+ *\S+) * (-*\d+)\/(-*\d+) *\[(\d+)\] *(\d+\.\d+): *(\S+):(\S+):*"),
 }
 
 def stack_handle(line, priv):
@@ -129,7 +150,32 @@ def stack_handle(line, priv):
     else:
         print("Error stack "+line)
 
+def cpu_clock_handle(line, priv):
+    [[stack_name_list, stack_addr_list], [ustack_name_list, ustack_addr_list]] = priv
+    key_word = line.split()
+    key_word_len = len(key_word)
+    if key_word_len > 1:
+        if int(key_word[0],16) > 0xf000000000000000:
+            stack_name_list.append(key_word[1])
+            stack_addr_list.append(key_word[0])
+        else:
+            ustack_name_list.append(key_word[1])
+            ustack_addr_list.append(key_word[0])
+    elif key_word_len == 1:
+        if int(key_word[0],16) > 0xf000000000000000:
+            stack_name_list.append(key_word[0])
+            stack_addr_list.append(key_word[0])
+        else:
+            ustack_name_list.append(key_word[0])
+            ustack_addr_list.append(key_word[0])
+    else:
+        print("Error stack "+line)
+
 def null_init(ev):
+    return
+
+def cpu_clock_init(ev):
+    ev.priv = [ev.kernel_stack, ev.user_stack]
     return
 
 def stack_init(ev):
@@ -198,8 +244,11 @@ mod_type = {
         "softirq_entry",
         "softirq_exit",
         "softirq_raise"],
-    "ftrace" : ["<stack trace>",
-        "<user stack trace>"]
+    "ftrace" : ["ftrace",
+        "<stack trace>",
+        "<user stack trace>"],
+    "perf" : ["perf",
+        "cpu-clock"]
 }
 
 event_type = {
@@ -236,7 +285,9 @@ event_type = {
     "softirq_exit"                     : ["irq",    softirq_init, null_handle, []],
     "softirq_raise"                    : ["irq",    softirq_init, null_handle, []],
     "<stack trace>"                    : ["ftrace", stack_init, stack_handle, []],
-    "<user stack trace>"               : ["ftrace", stack_init, stack_handle, []]
+    "<user stack trace>"               : ["ftrace", stack_init, stack_handle, []],
+    "cpu-clock"                        : ["perf", cpu_clock_init, cpu_clock_handle, []],
+    "cpu-cycles"                        : ["perf", cpu_clock_init, cpu_clock_handle, []],
 }
 
 def event_type_init():
@@ -254,9 +305,9 @@ class trace_event:
             return
         cpu_ev = cpu_ev_list[-1]
         if self.is_stack == TRACE_STACK_KERNEL:
-            cpu_ev.kernel_stack = self
+            cpu_ev.kernel_stack = self.priv[:]
         else:
-            cpu_ev.user_stack = self
+            cpu_ev.user_stack = self.priv[:]
         return
 
     def init_normal(self):
@@ -285,7 +336,7 @@ class trace_event:
             self.init_stack()
         else:
             self.init_normal()
-    def __init__(self, line=""):
+    def ftrace_event(self, line=""):
         self.raw = line
         self.available = TRACE_RETURN_TRUE
         if line[0:4] == ' => ':
@@ -298,8 +349,8 @@ class trace_event:
             self.available = TRACE_RETURN_COMMENT
             return
         self.is_stack = TRACE_STACK_NOT
-        self.kernel_stack = self
-        self.user_stack = self
+        self.kernel_stack = [[], []]
+        self.user_stack = [[], []]
         self.kernel_stack_hash = int(0)
         self.user_stack_hash = int(0)
         self.stack_hash = int(0)
@@ -337,6 +388,117 @@ class trace_event:
             self.priv = line
         self.init_common()
 
+    def perf_json_stack(self, te_json={}):
+        [stack_name_list, stack_addr_list] = self.kernel_stack
+        [ustack_name_list, ustack_addr_list] = self.user_stack
+        for callchain in te_json['callchain']:
+            if int(callchain['ip'],16) > 0xf000000000000000:
+                if 'ip' in callchain:
+                    stack_name_list.append(callchain['ip'])
+                if 'symbol' in callchain:
+                    stack_addr_list.append(callchain['symbol'])
+            else:
+                if 'ip' in callchain:
+                    ustack_name_list.append(callchain['ip'])
+                if 'symbol' in callchain:
+                    ustack_addr_list.append(callchain['symbol'])
+
+    def perf_json_event(self, te_json={}):
+        self.raw = te_json
+        self.available = TRACE_RETURN_TRUE
+        self.is_stack = TRACE_STACK_NOT
+        self.kernel_stack = [[], []]
+        self.user_stack = [[], []]
+        self.kernel_stack_hash = int(0)
+        self.user_stack_hash = int(0)
+        self.stack_hash = int(0)
+        self.cpu_delay = int(-1)
+        self.tid_delay = int(-1)
+        self.cpu_index = int(-1)
+        self.tid_index = int(-1)
+        self.name  = te_json['comm']
+        self.tid   = te_json['tid']
+        self.pid   = te_json['pid']
+        self.cpu   = int(te_json['cpu'])
+        self.state = ""
+        self.timestamp = float(te_json['timestamp']) / 1000000
+        self.event_name = "cpu-clock"
+        self.perf_json_stack(te_json)
+
+    def perf_script_event(self, line=""):
+        self.raw = line
+        self.available = TRACE_RETURN_TRUE
+        if line[0] == '\t' and len(line.split()) >= 1:
+            self.available = TRACE_RETURN_STACK
+            return
+        elif line.__len__() == 0:
+            self.available = TRACE_RETURN_COMMENT
+            return
+        elif line[0] == '#':
+            self.available = TRACE_RETURN_COMMENT
+            return
+        elif line[0] == '\n':
+            self.available = TRACE_RETURN_COMMENT
+            return
+        pattern = event_match['perf']
+        match = pattern.match(line)
+        if match is None:
+            self.available = TRACE_RETURN_FALSE
+            return
+        perf_hand = match.groups()
+        #print(perf_hand)
+        self.is_stack = TRACE_STACK_NOT
+        self.kernel_stack = [[], []]
+        self.user_stack = [[], []]
+        self.kernel_stack_hash = int(0)
+        self.user_stack_hash = int(0)
+        self.stack_hash = int(0)
+        self.cpu_delay = int(-1)
+        self.tid_delay = int(-1)
+        self.cpu_index = int(-1)
+        self.tid_index = int(-1)
+        self.name  = perf_hand[PERF_NAME_INDEX]
+        self.tid   = perf_hand[PERF_TID_INDEX]
+        self.pid   = perf_hand[PERF_PID_INDEX]
+        self.cpu   = int(perf_hand[PERF_CPU_INDEX])
+        self.state = ""
+        self.timestamp = float(perf_hand[PERF_TIMESTAMP_INDEX])
+        if perf_hand[PERF_EVENT_INDEX] == "cpu-clock" or perf_hand[PERF_EVENT_INDEX] == "cpu-cycles":
+            self.event_name = perf_hand[PERF_EVENT_INDEX]
+        else:
+            self.event_name = perf_hand[PERF_SUBEVENT_INDEX].strip(':')
+        if self.event_name in event_type:
+            [mod_name, init_op, handle_op, event_type_list] = event_type[self.event_name]
+            (start, end) = match.span()
+            event_type_list.append(self)
+            info = line[end : -1].strip()
+            if self.event_name not in event_match:
+                self.priv = info
+                init_op(self)
+                self.init_common()
+                return
+            pattern = event_match[self.event_name]
+            match = pattern.match(info)
+            if match is not None:
+                self.priv = match.groups()
+                init_op(self)
+            else:
+                self.priv = info
+                init_op(self)
+        else:
+            self.priv = line
+        self.init_common()
+
+    def __init__(self, line, format_type):
+        #print(line, format_type)
+        self.format_type = format_type
+        if format_type == TRACE_FORMAT_TYPE_FTRACE:
+            self.ftrace_event(line)
+        elif format_type == TRACE_FORMAT_TYPE_PERF_SCRIPT:
+            self.perf_script_event(line)
+        elif format_type == TRACE_FORMAT_TYPE_PERF_JSON:
+            self.perf_json_event(line)
+
     def get_available(self):
         return self.available
     def handle(self, line):
@@ -348,9 +510,9 @@ class trace_event:
 
 def init_trace_stack():
     for te in trace_list:
-        te.kernel_stack_hash = hash(str(te.kernel_stack.priv[0]))
-        te.user_stack_hash = hash(str(te.user_stack.priv[0]))
-        te.stack_hash = hash(str([te.kernel_stack.priv[0],te.user_stack.priv[0]]))
+        te.kernel_stack_hash = hash(str(te.kernel_stack[0]))
+        te.user_stack_hash = hash(str(te.user_stack[0]))
+        te.stack_hash = hash(str([te.kernel_stack[0],te.user_stack[0]]))
 
 def init_pid_event():
     for pid in pid_tid_list:
@@ -388,43 +550,39 @@ def parse_user_symbol(line):
     user_symbol_list[user_symbol_index] = [function_name, function_addr]
 
 def parse_cpu_delay():
-    for i in range(cpu_list):
-        trace_list = cpu_list[i]
-        index = 0
-        timestamp = 0
-        for te in trace_list:
+    for ev in cpu_list.values():
+        index = int(0)
+        timestamp = timestamp_start
+        for te in ev:
             te.cpu_index = index
             te.cpu_delay = te.timestamp - timestamp
             index = index + 1
             timestamp = te.timestamp
-        trace_list[0].cpu_delay = 0
 
 def parse_tid_delay():
-    for i in range(tid_list):
-        trace_list = tid_list[i]
-        index = 0
-        timestamp = 0
-        for te in trace_list:
+    for ev in tid_list.values():
+        index = int(0)
+        timestamp = timestamp_start
+        for te in ev:
             te.tid_index = index
             te.tid_delay = te.timestamp - timestamp
             index = index + 1
             timestamp = te.timestamp
-        trace_list[0].tid_delay = 0
 
 def parse_delay():
     parse_cpu_delay()
     parse_tid_delay()
 
-def parse_data(data):
+def parse_data(data, format_type=TRACE_FORMAT_TYPE_FTRACE):
     data_len = len(data)
     event_type_init()
     if data_len == 0:
         return
-    last_te = trace_event(data[0])
-    for i in range(0, data_len):
+    last_te = trace_event(data[0], format_type)
+    for i in range(1, data_len):
         line = data[i]
         #print(line)
-        te = trace_event(line)
+        te = trace_event(line, format_type)
         if te.get_available() == TRACE_RETURN_FALSE:
             print(data[i],"TRACE_RETURN_FALSE")
             continue
@@ -441,11 +599,28 @@ def parse_data(data):
                 continue
         last_te = te
         te_list.append(te)
+    return te_list
+
+def parse_perf_json(input_filename=INPUT_PERF_JSON):
+    fd=open(input_filename)
+    json_data=json.load(fd)
+    for json_te in json_data['samples']:
+        te = trace_event(json_te, TRACE_FORMAT_TYPE_PERF_JSON)
+        if te.get_available() == TRACE_RETURN_FALSE:
+            print("TRACE_RETURN_FALSE")
+            continue
+        te_list.append(te)
+    fd.close()
+    del json_data
+    return te_list
+
+def init_list():
     init_trace_stack()
     init_pid_event()
     init_stack_hash()
+    timestamp_start = trace_list[0].timestamp
+    timestamp_end = trace_list[-1].timestamp
     parse_delay()
-    return te_list
 
 def event_type_priv_max(event="<user stack trace>"):
     if event not in event_type:
@@ -496,15 +671,15 @@ def print_all_te(trace_list):
 
 def print_all_te_irq(trace_list):
     for te in trace_list:
-        if type(te.kernel_stack.priv[0])==list:
-            te.kernel_stack.priv[0].reverse()
-        if type(te.user_stack.priv[0])==list:
-            te.user_stack.priv[0].reverse()
-        print('%s\t%s\t%s\t%d, %s, %s' %(te.state, te.event_name, te.tid, te.cpu, te.kernel_stack.priv[0], te.user_stack.priv[0]))
-        if type(te.kernel_stack.priv[0])==list:
-            te.kernel_stack.priv[0].reverse()
-        if type(te.user_stack.priv[0])==list:
-            te.user_stack.priv[0].reverse()
+        if len(te.kernel_stack[0]) > 0:
+            te.kernel_stack[0].reverse()
+        if len(te.user_stack[0]) > 0:
+            te.user_stack[0].reverse()
+        print('%s\t%s\t%s\t%d, %s, %s' %(te.state, te.event_name, te.tid, te.cpu, te.kernel_stack[0], te.user_stack[0]))
+        if len(te.kernel_stack[0]) > 0:
+            te.kernel_stack[0].reverse()
+        if len(te.user_stack[0]) > 0:
+            te.user_stack[0].reverse()
 
 def print_all_cpu_te(cpu_list):
     for i in range(4):
@@ -513,54 +688,54 @@ def print_all_cpu_te(cpu_list):
             print(te.raw.strip())
 
 """
-iperf  8366 [000]  1419.092642:    1000000 cpu-clock:pppH:
-        ffffffff9286ee22 check_stack_object+0x82 ([kernel.kallsyms])
-        ffffffff9286f233 __check_object_size+0x23 ([kernel.kallsyms])
-        ffffffff931852db simple_copy_to_iter+0x2b ([kernel.kallsyms])
-        ffffffff93185398 __skb_datagram_iter+0x78 ([kernel.kallsyms])
-        ffffffff931856c8 skb_copy_datagram_iter+0x38 ([kernel.kallsyms])
-        ffffffff93285f9e tcp_recvmsg_locked+0x2ae ([kernel.kallsyms])
-        ffffffff932873b2 tcp_recvmsg+0x72 ([kernel.kallsyms])
-        ffffffff932cc4b4 inet_recvmsg+0x54 ([kernel.kallsyms])
-        ffffffff931690b1 sock_recvmsg+0x81 ([kernel.kallsyms])
-        ffffffff9316be87 __sys_recvfrom+0xb7 ([kernel.kallsyms])
-        ffffffff9316bf44 __x64_sys_recvfrom+0x24 ([kernel.kallsyms])
-        ffffffff9348c1ac do_syscall_64+0x5c ([kernel.kallsyms])
-        ffffffff936000aa entry_SYSCALL_64_after_hwframe+0x72 ([kernel.kallsyms])
-                  12786e __libc_recv+0x6e (/usr/lib/x86_64-linux-gnu/libc.so.6)
-                  12786e __libc_recv+0x6e (/usr/lib/x86_64-linux-gnu/libc.so.6)
-                    cd86 [unknown] (/usr/bin/iperf)
-                   25154 [unknown] (/usr/bin/iperf)
-                   94b42 start_thread+0x2f2 (/usr/lib/x86_64-linux-gnu/libc.so.6)
-                  1269ff __clone3+0x2f (inlined)
+perf-exec   27804/27804   [000]   959.661520: cpu-clock:ppp:                         
+	ffffffffa85ba87a unmap_page_range+0x38a ([kernel.kallsyms])
+	ffffffffa85baa9e unmap_single_vma+0x7e ([kernel.kallsyms])
+	ffffffffa85badf5 unmap_vmas+0xe5 ([kernel.kallsyms])
+	ffffffffa85cab5a exit_mmap+0xda ([kernel.kallsyms])
+	ffffffffa82e4218 __mmput+0x48 ([kernel.kallsyms])
+	ffffffffa82e4351 mmput+0x31 ([kernel.kallsyms])
+	ffffffffa8683d56 exec_mmap+0x176 ([kernel.kallsyms])
+	ffffffffa8686e2b begin_new_exec+0x11b ([kernel.kallsyms])
+	ffffffffa870fa38 load_elf_binary+0x2d8 ([kernel.kallsyms])
+	ffffffffa8683fea search_binary_handler+0xda ([kernel.kallsyms])
+	ffffffffa86844c6 exec_binprm+0x56 ([kernel.kallsyms])
+	ffffffffa868634c bprm_execve.part.0+0x18c ([kernel.kallsyms])
+	ffffffffa868645e bprm_execve+0x5e ([kernel.kallsyms])
+	ffffffffa8686648 do_execveat_common.isra.0+0x198 ([kernel.kallsyms])
+	ffffffffa86869a7 __x64_sys_execve+0x37 ([kernel.kallsyms])
+	ffffffffa928c1ac do_syscall_64+0x5c ([kernel.kallsyms])
+	ffffffffa94000aa entry_SYSCALL_64_after_hwframe+0x72 ([kernel.kallsyms])
 
+swapper       0/0       [001]   959.661867: cpu-clock:ppp:                         
 """
-def print_perf_te(te):
+def event_to_perf(te):
     if te.pid == "-------":
         print('%s\t0\t[00%d]\t%0.06f:\t1000\t%s:' %(te.name, te.cpu, te.timestamp, te.event_name))
     else:
         print('%s\t%s\t[00%d]\t%0.06f:\t1000\t%s:' %(te.name, te.pid, te.cpu, te.timestamp, te.event_name))
-    if type(te.kernel_stack.priv[0])==list:
-        for i in range(len(te.kernel_stack.priv[0])):
-            stack=te.kernel_stack.priv[0][i]
-            addr=te.kernel_stack.priv[1][i]
+    if len(te.kernel_stack[0]) > 0:
+        for i in range(len(te.kernel_stack[0])):
+            stack=te.kernel_stack[0][i]
+            addr=te.kernel_stack[1][i]
             print("\t%s %s ([kernel.kallsyms])" %(addr.strip('<').strip('>'), stack))
-    if type(te.user_stack.priv[0])==list:
-        for i in range(len(te.user_stack.priv[0])):
-            stack=te.user_stack.priv[0][i]
-            addr=te.user_stack.priv[1][i]
+    if len(te.user_stack[0]) > 0:
+        for i in range(len(te.user_stack[0])):
+            stack=te.user_stack[0][i]
+            addr=te.user_stack[1][i]
             print("\t%s %s (%s)" %(addr.strip('<').strip('>'), stack, te.name))
     print("")
 
-def print_perf():
+def conver_to_perf():
     for te in trace_list:
-        print_perf_te(te)
+        event_to_perf(te)
 
 if __name__ == '__main__':
-    data = read_input(INPUT_FILE_WITH_STACK)
-    te_list=parse_data(data)
+    data = read_input(INPUT_FTRACE_FILE)
+    te_list=parse_data(data, format_type=TRACE_FORMAT_TYPE_FTRACE)
+    data = read_input(INPUT_PERF_SCRIPT)
+    te_list=parse_data(data, format_type=TRACE_FORMAT_TYPE_PERF_SCRIPT)
     #event_stack_stat(trace_list)
     #print_all_te(trace_list)
     #print_all_te_irq(trace_list)
     #print_all_cpu_te(cpu_list)
-    print_perf()
