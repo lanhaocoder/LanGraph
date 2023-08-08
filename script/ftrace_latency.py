@@ -72,6 +72,10 @@ stack_hash_list = {}
 user_symbol_list = {}
 timestamp_start=-1.0
 timestamp_end=-1.0
+irq_tid=int(0)
+vec_tid=int(0)
+
+pid_valid=re.compile("\d+")
 
 def save_variable(v,filename):
     f=open(filename,'wb')
@@ -248,7 +252,8 @@ mod_type = {
         "<stack trace>",
         "<user stack trace>"],
     "perf" : ["perf",
-        "cpu-clock"]
+        "cpu-clock",
+        "cpu-cycles"]
 }
 
 event_type = {
@@ -324,14 +329,22 @@ class trace_event:
             tid_ev_list = tid_list[self.tid]
         tid_ev_list.append(self)
         if self.pid not in pid_tid_list:
-            pid_ev_list = set()
+            pid_ev_list = dict()
             pid_tid_list[self.pid] = pid_ev_list
+            pid_ev_list["name"] = ""
         else:
             pid_ev_list = pid_tid_list[self.pid]
-        pid_ev_list.add(self.tid)
+        if self.pid == self.tid:
+            pid_ev_list["name"] = self.name
+        if self.tid not in pid_ev_list:
+            pid_ev_list[self.tid] = self.name
         trace_list.append(self)
         return
     def init_common(self):
+        if pid_valid.match(self.pid) is None:
+            self.pid = "0"
+        if pid_valid.match(self.tid) is None:
+            self.tid = "0"
         if self.is_stack != TRACE_STACK_NOT:
             self.init_stack()
         else:
@@ -519,9 +532,31 @@ def init_pid_event():
         tid_id_list = pid_tid_list[pid]
         pid_event_list = []
         for tid in tid_id_list:
+            if tid == "name":
+                continue
             pid_event_list.extend(tid_list[tid])
         pid_event_list.sort(key=lambda x: x.timestamp)
         pid_list[pid] = pid_event_list
+
+def irq_to_thread_name(pid_cur, irq_ev_list):
+    for irq_id in irq_ev_list:
+        ev = irq_ev_list[irq_id]
+        if
+def init_metadata_event():
+    global irq_tid
+    global vec_tid
+    pid_name_list=list()
+    for pid in pid_tid_list:
+        tid_id_list = pid_tid_list[pid]
+        for tid in tid_id_list:
+            if tid == "name":
+                continue
+            pid_name_list.append(int(tid))
+    pid_cur = max(pid_name_list)
+    irq_tid = pid_cur
+    pid_cur = irq_to_thread_name(pid_cur, irq_list)
+    vec_tid = pid_cur
+    pid_cur = irq_to_thread_name(pid_cur, vec_list)
 
 def init_stack_hash():
     for te in trace_list:
@@ -589,7 +624,6 @@ def init_global():
     init_list(tid_list)
     init_list(vec_list)
     init_trace_stack()
-    init_pid_event()
     init_stack_hash()
     timestamp_start = trace_list[0].timestamp
     timestamp_end = trace_list[-1].timestamp
