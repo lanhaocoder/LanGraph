@@ -59,6 +59,12 @@ PERF_CPU_INDEX=3
 PERF_TIMESTAMP_INDEX=4
 PERF_EVENT_INDEX=5
 PERF_SUBEVENT_INDEX=6
+DELAY_TOTAL = 0
+DELAY_CPU = 1
+DELAY_TID = 2
+DELAY_IRQ = 3
+DELAY_SOFTIRQ = 4
+DELAY_MAX = 5
 
 cpu_list={}
 tid_list={}
@@ -74,6 +80,7 @@ timestamp_start=-1.0
 timestamp_end=-1.0
 irq_tid=int(0)
 vec_tid=int(0)
+cpu_tid=int(0)
 
 pid_valid=re.compile("\d+")
 
@@ -341,14 +348,21 @@ class trace_event:
         trace_list.append(self)
         return
     def init_common(self):
-        if pid_valid.match(self.pid) is None:
-            self.pid = "0"
-        if pid_valid.match(self.tid) is None:
-            self.tid = "0"
         if self.is_stack != TRACE_STACK_NOT:
             self.init_stack()
         else:
             self.init_normal()
+
+    def handle_pid_tid(self):
+        if pid_valid.match(self.pid) is not None:
+            self.pid = int(self.pid)
+        else:
+            self.pid = int(0)
+        if pid_valid.match(self.tid) is not None:
+            self.tid = int(self.tid)
+        else:
+            self.tid = int(0)
+
     def ftrace_event(self, line=""):
         self.raw = line
         self.available = TRACE_RETURN_TRUE
@@ -374,6 +388,7 @@ class trace_event:
         self.name  = line[ NAME_START: NAME_END].strip()
         self.tid   = line[  TID_START:  TID_END].strip()
         self.pid   = line[  PID_START:  PID_END].strip()
+        self.handle_pid_tid()
         self.cpu   = int(line[  CPU_START:  CPU_END].strip())
         self.state = line[STATE_START:STATE_END].strip()
         key_word = line[TID_START:-1].split(':')
@@ -425,9 +440,8 @@ class trace_event:
         self.kernel_stack_hash = int(0)
         self.user_stack_hash = int(0)
         self.stack_hash = int(0)
-        self.cpu_delay = int(-1)
-        self.tid_delay = int(-1)
-        self.cpu_index = int(-1)
+        self.delay = [int(0)] * DELAY_MAX
+        self.index = [int(0)] * DELAY_MAX
         self.tid_index = int(-1)
         self.name  = te_json['comm']
         self.tid   = te_json['tid']
@@ -473,6 +487,7 @@ class trace_event:
         self.name  = perf_hand[PERF_NAME_INDEX]
         self.tid   = perf_hand[PERF_TID_INDEX]
         self.pid   = perf_hand[PERF_PID_INDEX]
+        self.handle_pid_tid()
         self.cpu   = int(perf_hand[PERF_CPU_INDEX])
         self.state = ""
         self.timestamp = float(perf_hand[PERF_TIMESTAMP_INDEX])
@@ -521,6 +536,60 @@ class trace_event:
             [mod_name, init_op, handle_op, event_type_list] = event_type[self.event_name]
             handle_op(line, self.priv)
 
+def get_irq_name(event_name, irq_ev):
+    (irq_num, irq_name) = irq_ev[0].priv
+    for ev in irq_ev:
+        if event_name == ev.event_name:
+            (irq_num, irq_name) = ev.priv
+            return irq_name
+    return irq_name
+
+def irq_to_thread_name(irq_list_name, event_name, pid_cur, irq_ev_list):
+    global pid_tid_list
+    irq_pid_list = {'name' : irq_list_name}
+    irq_pid_max = pid_cur
+    for irq_id in irq_ev_list.keys():
+        irq_pid = pid_cur + int(irq_id)
+        irq_pid_max = max(irq_pid_max, irq_pid)
+        irq_name = get_irq_name(event_name, irq_ev_list[irq_id])
+        irq_pid_list[irq_pid] = irq_name
+    pid_tid_list[pid_cur] = irq_pid_list
+    return irq_pid_max
+
+def cpu_to_thread_name(cpu_list_name, pid_cur, cpu_ev_list):
+    global pid_tid_list
+    cpu_pid_list = {'name' : cpu_list_name}
+    cpu_pid_max = pid_cur
+    for cpu_id in cpu_ev_list.keys():
+        cpu_pid = pid_cur + int(cpu_id)
+        cpu_pid_max = max(cpu_pid_max, cpu_pid)
+        cpu_name = cpu_list_name+'_'+str(cpu_id)
+        cpu_pid_list[cpu_pid] = cpu_name
+    pid_tid_list[pid_cur] = cpu_pid_list
+    return cpu_pid_max
+
+def get_max_tid():
+    pid_name_list=list()
+    for pid in pid_tid_list:
+        tid_id_list = pid_tid_list[pid]
+        for tid in tid_id_list:
+            if tid == "name":
+                continue
+            pid_name_list.append(tid)
+    return max(pid_name_list)
+
+def init_metadata_event():
+    global cpu_tid
+    global irq_tid
+    global vec_tid
+    pid_cur = get_max_tid() + 1
+    cpu_tid = pid_cur
+    pid_cur = cpu_to_thread_name("langrah_cpu", pid_cur, cpu_list) + 1
+    irq_tid = pid_cur
+    pid_cur = irq_to_thread_name("langrah_irq", 'irq_handler_entry', pid_cur, irq_list) + 1
+    vec_tid = pid_cur
+    pid_cur = irq_to_thread_name("langrah_softirq", 'softirq_entry', pid_cur, vec_list)
+
 def init_trace_stack():
     for te in trace_list:
         te.kernel_stack_hash = hash(str(te.kernel_stack[0]))
@@ -537,26 +606,6 @@ def init_pid_event():
             pid_event_list.extend(tid_list[tid])
         pid_event_list.sort(key=lambda x: x.timestamp)
         pid_list[pid] = pid_event_list
-
-def irq_to_thread_name(pid_cur, irq_ev_list):
-    for irq_id in irq_ev_list:
-        ev = irq_ev_list[irq_id]
-        if
-def init_metadata_event():
-    global irq_tid
-    global vec_tid
-    pid_name_list=list()
-    for pid in pid_tid_list:
-        tid_id_list = pid_tid_list[pid]
-        for tid in tid_id_list:
-            if tid == "name":
-                continue
-            pid_name_list.append(int(tid))
-    pid_cur = max(pid_name_list)
-    irq_tid = pid_cur
-    pid_cur = irq_to_thread_name(pid_cur, irq_list)
-    vec_tid = pid_cur
-    pid_cur = irq_to_thread_name(pid_cur, vec_list)
 
 def init_stack_hash():
     for te in trace_list:
@@ -584,29 +633,21 @@ def parse_user_symbol(line):
     user_symbol_index="%s[+%s]" %(exec_file, function_addr)
     user_symbol_list[user_symbol_index] = [function_name, function_addr]
 
-def parse_cpu_delay():
-    for ev in cpu_list.values():
+def parse_delay_list(delay_list, delay_offset):
+    for ev in delay_list.values():
         index = int(0)
         timestamp = timestamp_start
         for te in ev:
-            te.cpu_index = index
-            te.cpu_delay = te.timestamp - timestamp
-            index = index + 1
-            timestamp = te.timestamp
-
-def parse_tid_delay():
-    for ev in tid_list.values():
-        index = int(0)
-        timestamp = timestamp_start
-        for te in ev:
-            te.tid_index = index
-            te.tid_delay = te.timestamp - timestamp
+            te.index[delay_offset] = index
+            te.delay[delay_offset] = te.timestamp - timestamp
             index = index + 1
             timestamp = te.timestamp
 
 def parse_delay():
-    parse_cpu_delay()
-    parse_tid_delay()
+    parse_delay_list(tid_list, DELAY_TID)
+    parse_delay_list(cpu_list, DELAY_CPU)
+    parse_delay_list(vec_list, DELAY_SOFTIRQ)
+    parse_delay_list(irq_list, DELAY_IRQ)
 
 def init_list(ls):
     if type(ls) != dict:
@@ -628,6 +669,7 @@ def init_global():
     timestamp_start = trace_list[0].timestamp
     timestamp_end = trace_list[-1].timestamp
     parse_delay()
+    init_metadata_event()
 
 def parse_data(data, format_type=TRACE_FORMAT_TYPE_FTRACE):
     data_len = len(data)
@@ -803,6 +845,85 @@ def event_to_perf(te):
 def conver_to_perf():
     for te in trace_list:
         event_to_perf(te)
+
+class trace_event_json_item:
+    def __init__(self):
+        self.name = str('')
+        self.args = {}
+        self.cat = str('')
+        self.pid = int(0)
+        self.tid = int(0)
+        self.ts = int(0)
+        self.dur = int(0)
+        self.ph = str('')
+        self.bind_id = str('')
+        self.flow_in = bool(0)
+        self.flow_out = bool(0)
+
+class trace_event_json:
+    def get_json_tree(self):
+        return self.json_tree
+
+    def clean_json_tree(self):
+        self.json_tree={}
+        self.json_tree['traceEvents'] = list()
+        self.json_tree_result=[self.json_tree]
+
+    def save_json(self, output=OUTPUT_FILE):
+        fd = open(output, 'w+')
+        fd.write(json.dumps(self.json_tree_result, indent=0))
+
+    def __init__(self):
+        self.clean_json_tree()
+
+    def format_item(self, item):
+        json_item = dict()
+        json_item['name'] = item.name
+        json_item['args'] = item.args
+        json_item['cat'] = item.cat
+        json_item['pid'] = item.pid
+        json_item['tid'] = item.tid
+        json_item['ts'] = item.ts
+        json_item['dur'] = item.dur
+        json_item['ts'] = item.ts
+        json_item['ph'] = item.ph
+        if item.bind_id != '':
+            json_item['bind_id'] = item.bind_id
+            json_item['flow_in'] = item.flow_in
+            json_item['flow_out'] = item.flow_out
+        self.json_tree['traceEvents'].append(json_item)
+
+    def format_pidname_item(self, name, pid, tid):
+        item = trace_event_json()
+        item.name = "process_name"
+        item.args['name'] = name
+        item.pid = pid
+        item.tid = tid
+        item.ts = int(0)
+        item.cat = '__metadata'
+        item.ph = "M"
+        self.format_item(item)
+
+    def format_tidname_item(self, name, pid, tid):
+        item = trace_event_json()
+        item.name = "thread_name"
+        item.args['name'] = name
+        item.pid = pid
+        item.tid = tid
+        item.ts = int(0)
+        item.cat = '__metadata'
+        item.ph = "M"
+        self.format_item(item)
+
+    def json_metadata_thread_name(self, pid_tid_list):
+        for pid in pid_tid_list:
+            tid_id_list = pid_tid_list[pid]
+            for tid in tid_id_list:
+                pid_name = tid_id_list[tid]
+                if tid != "name":
+                    self.format_tidname_item(pid_name, pid, tid)
+                else:
+                    self.format_pidname_item(pid_name, pid, pid)
 
 if __name__ == '__main__':
     data = read_input(INPUT_FTRACE_FILE)
