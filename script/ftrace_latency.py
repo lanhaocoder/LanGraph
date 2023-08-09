@@ -381,10 +381,9 @@ class trace_event:
         self.kernel_stack_hash = int(0)
         self.user_stack_hash = int(0)
         self.stack_hash = int(0)
-        self.cpu_delay = int(-1)
-        self.tid_delay = int(-1)
-        self.cpu_index = int(-1)
-        self.tid_index = int(-1)
+        self.delay = [int(0)] * DELAY_MAX
+        self.index = [int(0)] * DELAY_MAX
+        self.period = {}
         self.name  = line[ NAME_START: NAME_END].strip()
         self.tid   = line[  TID_START:  TID_END].strip()
         self.pid   = line[  PID_START:  PID_END].strip()
@@ -442,6 +441,7 @@ class trace_event:
         self.stack_hash = int(0)
         self.delay = [int(0)] * DELAY_MAX
         self.index = [int(0)] * DELAY_MAX
+        self.period = {}
         self.tid_index = int(-1)
         self.name  = te_json['comm']
         self.tid   = te_json['tid']
@@ -480,10 +480,9 @@ class trace_event:
         self.kernel_stack_hash = int(0)
         self.user_stack_hash = int(0)
         self.stack_hash = int(0)
-        self.cpu_delay = int(-1)
-        self.tid_delay = int(-1)
-        self.cpu_index = int(-1)
-        self.tid_index = int(-1)
+        self.delay = [int(0)] * DELAY_MAX
+        self.index = [int(0)] * DELAY_MAX
+        self.period = {}
         self.name  = perf_hand[PERF_NAME_INDEX]
         self.tid   = perf_hand[PERF_TID_INDEX]
         self.pid   = perf_hand[PERF_PID_INDEX]
