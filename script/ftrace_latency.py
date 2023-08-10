@@ -8,6 +8,7 @@ Created on Thu Aug 16 00:19:13 2018
 import re
 import pickle
 import json
+import copy
 
 INPUT_FTRACE_FILE="langraph/ftrace.log"
 INPUT_FTRACE_SYMBOL_FILE="langraph/ftrace_symbol.log"
@@ -59,6 +60,7 @@ PERF_CPU_INDEX=3
 PERF_TIMESTAMP_INDEX=4
 PERF_EVENT_INDEX=5
 PERF_SUBEVENT_INDEX=6
+
 DELAY_TOTAL = 0
 DELAY_CPU = 1
 DELAY_TID = 2
@@ -263,48 +265,56 @@ mod_type = {
         "cpu-cycles"]
 }
 
+class event_pre_opt:
+    def __init__(self, mod_name = '', init_op = null_init,
+                 handle_op = null_handle, ev_list = []):
+        self.mod_name = mod_name
+        self.init_op = init_op
+        self.handle_op = handle_op
+        self.event_type_list = ev_list
+
 event_type = {
-    "sched_kthread_stop"               : ["sched",  null_init, null_handle, []],
-    "sched_kthread_stop_ret"           : ["sched",  null_init, null_handle, []],
-    "sched_kthread_work_execute_end"   : ["sched",  null_init, null_handle, []],
-    "sched_kthread_work_execute_start" : ["sched",  null_init, null_handle, []],
-    "sched_kthread_work_queue_work"    : ["sched",  null_init, null_handle, []],
-    "sched_migrate_task"               : ["sched",  null_init, null_handle, []],
-    "sched_move_numa"                  : ["sched",  null_init, null_handle, []],
-    "sched_pi_setprio"                 : ["sched",  null_init, null_handle, []],
-    "sched_process_exec"               : ["sched",  null_init, null_handle, []],
-    "sched_process_exit"               : ["sched",  null_init, null_handle, []],
-    "sched_process_fork"               : ["sched",  null_init, null_handle, []],
-    "sched_process_free"               : ["sched",  null_init, null_handle, []],
-    "sched_process_hang"               : ["sched",  null_init, null_handle, []],
-    "sched_process_wait"               : ["sched",  null_init, null_handle, []],
-    "sched_stat_blocked"               : ["sched",  null_init, null_handle, []],
-    "sched_stat_iowait"                : ["sched",  null_init, null_handle, []],
-    "sched_stat_runtime"               : ["sched",  null_init, null_handle, []],
-    "sched_stat_sleep"                 : ["sched",  null_init, null_handle, []],
-    "sched_stat_wait"                  : ["sched",  null_init, null_handle, []],
-    "sched_stick_numa"                 : ["sched",  null_init, null_handle, []],
-    "sched_swap_numa"                  : ["sched",  null_init, null_handle, []],
-    "sched_switch"                     : ["sched",  null_init, null_handle, []],
-    "sched_wait_task"                  : ["sched",  null_init, null_handle, []],
-    "sched_wake_idle_without_ipi"      : ["sched",  null_init, null_handle, []],
-    "sched_wakeup"                     : ["sched",  null_init, null_handle, []],
-    "sched_wakeup_new"                 : ["sched",  null_init, null_handle, []],
-    "sched_waking"                     : ["sched",  null_init, null_handle, []],
-    "irq_handler_entry"                : ["irq",    irq_init, null_handle, []],
-    "irq_handler_exit"                 : ["irq",    irq_init, null_handle, []],
-    "softirq_entry"                    : ["irq",    softirq_init, null_handle, []],
-    "softirq_exit"                     : ["irq",    softirq_init, null_handle, []],
-    "softirq_raise"                    : ["irq",    softirq_init, null_handle, []],
-    "<stack trace>"                    : ["ftrace", stack_init, stack_handle, []],
-    "<user stack trace>"               : ["ftrace", stack_init, stack_handle, []],
-    "cpu-clock"                        : ["perf", cpu_clock_init, cpu_clock_handle, []],
-    "cpu-cycles"                        : ["perf", cpu_clock_init, cpu_clock_handle, []],
+    "sched_kthread_stop"               : event_pre_opt("sched"),
+    "sched_kthread_stop_ret"           : event_pre_opt("sched"),
+    "sched_kthread_work_execute_end"   : event_pre_opt("sched"),
+    "sched_kthread_work_execute_start" : event_pre_opt("sched"),
+    "sched_kthread_work_queue_work"    : event_pre_opt("sched"),
+    "sched_migrate_task"               : event_pre_opt("sched"),
+    "sched_move_numa"                  : event_pre_opt("sched"),
+    "sched_pi_setprio"                 : event_pre_opt("sched"),
+    "sched_process_exec"               : event_pre_opt("sched"),
+    "sched_process_exit"               : event_pre_opt("sched"),
+    "sched_process_fork"               : event_pre_opt("sched"),
+    "sched_process_free"               : event_pre_opt("sched"),
+    "sched_process_hang"               : event_pre_opt("sched"),
+    "sched_process_wait"               : event_pre_opt("sched"),
+    "sched_stat_blocked"               : event_pre_opt("sched"),
+    "sched_stat_iowait"                : event_pre_opt("sched"),
+    "sched_stat_runtime"               : event_pre_opt("sched"),
+    "sched_stat_sleep"                 : event_pre_opt("sched"),
+    "sched_stat_wait"                  : event_pre_opt("sched"),
+    "sched_stick_numa"                 : event_pre_opt("sched"),
+    "sched_swap_numa"                  : event_pre_opt("sched"),
+    "sched_switch"                     : event_pre_opt("sched"),
+    "sched_wait_task"                  : event_pre_opt("sched"),
+    "sched_wake_idle_without_ipi"      : event_pre_opt("sched"),
+    "sched_wakeup"                     : event_pre_opt("sched"),
+    "sched_wakeup_new"                 : event_pre_opt("sched"),
+    "sched_waking"                     : event_pre_opt("sched"),
+    "irq_handler_entry"                : event_pre_opt("irq",    irq_init    ),
+    "irq_handler_exit"                 : event_pre_opt("irq",    irq_init    ),
+    "softirq_entry"                    : event_pre_opt("irq",    softirq_init),
+    "softirq_exit"                     : event_pre_opt("irq",    softirq_init),
+    "softirq_raise"                    : event_pre_opt("irq",    softirq_init),
+    "<stack trace>"                    : event_pre_opt("ftrace", stack_init  ),
+    "<user stack trace>"               : event_pre_opt("ftrace", stack_init  ),
+    "cpu-clock"                        : event_pre_opt("perf",   cpu_clock_init, cpu_clock_handle),
+    "cpu-cycles"                       : event_pre_opt("perf",   cpu_clock_init, cpu_clock_handle),
 }
 
 def event_type_init():
-    for mod_name, init_op, handle_op, event_type_list in event_type.values():
-        event_type_list.clear()
+    for opt in event_type.values():
+        opt.event_type_list.clear()
 
 "<...>-154717  ( 154717) [000] d.... 27117.357065: sched_stat_runtime: "
 class trace_event:
@@ -391,26 +401,26 @@ class trace_event:
         self.cpu   = int(line[  CPU_START:  CPU_END].strip())
         self.state = line[STATE_START:STATE_END].strip()
         key_word = line[TID_START:-1].split(':')
-        self.timestamp = float(key_word[0].split()[-1])
+        self.timestamp = int(key_word[0].split()[-1].replace('.',''))
         self.event_name = key_word[1].strip()
         if self.event_name in event_type:
-            [mod_name, init_op, handle_op, event_type_list] = event_type[self.event_name]
+            opt = event_type[self.event_name]
             (start, end) = re.search(self.event_name, line).span()
-            event_type_list.append(self)
+            opt.event_type_list.append(self)
             info = line[end + 2 : -1]
             if self.event_name not in event_match:
                 self.priv = info
-                init_op(self)
+                opt.init_op(self)
                 self.init_common()
                 return
             pattern = event_match[self.event_name]
             match = pattern.match(info)
             if match is not None:
                 self.priv = match.groups()
-                init_op(self)
+                opt.init_op(self)
             else:
                 self.priv = info
-                init_op(self)
+                opt.init_op(self)
         else:
             self.priv = line
         self.init_common()
@@ -430,7 +440,7 @@ class trace_event:
                 if 'symbol' in callchain:
                     ustack_addr_list.append(callchain['symbol'])
 
-    def perf_json_event(self, te_json={}):
+    def perf_json_event(self, te_json):
         self.raw = te_json
         self.available = TRACE_RETURN_TRUE
         self.is_stack = TRACE_STACK_NOT
@@ -448,7 +458,7 @@ class trace_event:
         self.pid   = te_json['pid']
         self.cpu   = int(te_json['cpu'])
         self.state = ""
-        self.timestamp = float(te_json['timestamp']) / 1000000
+        self.timestamp = te_json['timestamp']
         self.event_name = "cpu-clock"
         self.perf_json_stack(te_json)
 
@@ -489,29 +499,29 @@ class trace_event:
         self.handle_pid_tid()
         self.cpu   = int(perf_hand[PERF_CPU_INDEX])
         self.state = ""
-        self.timestamp = float(perf_hand[PERF_TIMESTAMP_INDEX])
+        self.timestamp = int(perf_hand[PERF_TIMESTAMP_INDEX].replace('.',''))
         if perf_hand[PERF_EVENT_INDEX] == "cpu-clock" or perf_hand[PERF_EVENT_INDEX] == "cpu-cycles":
             self.event_name = perf_hand[PERF_EVENT_INDEX]
         else:
             self.event_name = perf_hand[PERF_SUBEVENT_INDEX].strip(':')
         if self.event_name in event_type:
-            [mod_name, init_op, handle_op, event_type_list] = event_type[self.event_name]
+            opt = event_type[self.event_name]
             (start, end) = match.span()
-            event_type_list.append(self)
+            opt.event_type_list.append(self)
             info = line[end : -1].strip()
             if self.event_name not in event_match:
                 self.priv = info
-                init_op(self)
+                opt.init_op(self)
                 self.init_common()
                 return
             pattern = event_match[self.event_name]
             match = pattern.match(info)
             if match is not None:
                 self.priv = match.groups()
-                init_op(self)
+                opt.init_op(self)
             else:
                 self.priv = info
-                init_op(self)
+                opt.init_op(self)
         else:
             self.priv = line
         self.init_common()
@@ -532,8 +542,8 @@ class trace_event:
         if self.available != TRACE_RETURN_TRUE:
             return
         if self.event_name in event_type:
-            [mod_name, init_op, handle_op, event_type_list] = event_type[self.event_name]
-            handle_op(line, self.priv)
+            opt = event_type[self.event_name]
+            opt.handle_op(line, self.priv)
 
 def get_irq_name(event_name, irq_ev):
     (irq_num, irq_name) = irq_ev[0].priv
@@ -741,18 +751,18 @@ def event_type_priv_max(event="<user stack trace>"):
     if event not in event_type:
         print("Event %s not in event_type." %event)
         return
-    [name, init_op, handle_op, ev_list] = event_type[event]
+    opt = event_type[event]
     max_size = 0
-    for ev in ev_list:
+    for ev in opt.event_type_list:
         if max_size < len(ev.priv):
             max_size = len(ev.priv)
     print("%s max_size is %d." %(event, max_size))
 
 def event_type_print_priv():
     for name in event_type:
-        [mod_name, init, handle, ev] = event_type[name]
-        if len(ev) != 0:
-            print(name, ev[0].priv)
+        opt = event_type[name]
+        if len(opt.event_type_list) != 0:
+            print(name, opt.event_type_list[0].priv)
         else:
             print(name)
 
@@ -923,6 +933,57 @@ class trace_event_json:
                     self.format_tidname_item(pid_name, pid, tid)
                 else:
                     self.format_pidname_item(pid_name, pid, pid)
+
+def null_timeline(ev):
+    return
+
+def null_insert_cpu(ev):
+    return
+
+class event_post_opt:
+    def __init__(self, timeline_op = null_timeline,
+                 insert_cpu_op = null_insert_cpu):
+        self.timeline_op = timeline_op
+        self.insert_cpu_op = insert_cpu_op
+
+event_post_type = {
+    "sched_kthread_stop"               : event_post_opt(),
+    "sched_kthread_stop_ret"           : event_post_opt(),
+    "sched_kthread_work_execute_end"   : event_post_opt(),
+    "sched_kthread_work_execute_start" : event_post_opt(),
+    "sched_kthread_work_queue_work"    : event_post_opt(),
+    "sched_migrate_task"               : event_post_opt(),
+    "sched_move_numa"                  : event_post_opt(),
+    "sched_pi_setprio"                 : event_post_opt(),
+    "sched_process_exec"               : event_post_opt(),
+    "sched_process_exit"               : event_post_opt(),
+    "sched_process_fork"               : event_post_opt(),
+    "sched_process_free"               : event_post_opt(),
+    "sched_process_hang"               : event_post_opt(),
+    "sched_process_wait"               : event_post_opt(),
+    "sched_stat_blocked"               : event_post_opt(),
+    "sched_stat_iowait"                : event_post_opt(),
+    "sched_stat_runtime"               : event_post_opt(),
+    "sched_stat_sleep"                 : event_post_opt(),
+    "sched_stat_wait"                  : event_post_opt(),
+    "sched_stick_numa"                 : event_post_opt(),
+    "sched_swap_numa"                  : event_post_opt(),
+    "sched_switch"                     : event_post_opt(),
+    "sched_wait_task"                  : event_post_opt(),
+    "sched_wake_idle_without_ipi"      : event_post_opt(),
+    "sched_wakeup"                     : event_post_opt(),
+    "sched_wakeup_new"                 : event_post_opt(),
+    "sched_waking"                     : event_post_opt(),
+    "irq_handler_entry"                : event_post_opt(),
+    "irq_handler_exit"                 : event_post_opt(),
+    "softirq_entry"                    : event_post_opt(),
+    "softirq_exit"                     : event_post_opt(),
+    "softirq_raise"                    : event_post_opt(),
+    "<stack trace>"                    : event_post_opt(),
+    "<user stack trace>"               : event_post_opt(),
+    "cpu-clock"                        : event_post_opt(),
+    "cpu-cycles"                       : event_post_opt(),
+}
 
 if __name__ == '__main__':
     data = read_input(INPUT_FTRACE_FILE)
