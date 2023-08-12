@@ -572,7 +572,7 @@ class trace_event_database:
         def init_normal(self, te):
             self.insert_dict_list(te, te.cpu, self.db.cpu_list)
             self.insert_dict_list(te, te.tid, self.db.tid_list)
-            self.insert_tid_pid_list(te)
+            self.insert_dict_list(te, te.event_name, self.db.event_mod_list)
             self.db.trace_list.append(te)
             return
 
@@ -800,6 +800,7 @@ class trace_event_database:
         self.vec_list = {}
         self.trace_list = []
         self.pid_list = {}
+        self.event_mod_list = {}
         self.pid_tid_list = {}
         self.te_list = []
         self.stack_hash_list = {}
