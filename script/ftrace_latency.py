@@ -9,6 +9,7 @@ import re
 import pickle
 import json
 import copy
+import time
 
 INPUT_FTRACE_FILE = "langraph/ftrace.log"
 INPUT_FTRACE_SYMBOL_FILE = "langraph/ftrace_symbol.log"
@@ -87,245 +88,168 @@ cpu_tid = int(0)
 pid_valid = re.compile("\d+")
 
 
-def save_variable(v, filename):
-    f = open(filename, 'wb')
-    pickle.dump(v, f)
-    f.close()
-    return filename
+class file_opt:
+    def save_variable(v, filename):
+        f = open(filename, 'wb')
+        pickle.dump(v, f)
+        f.close()
+        return filename
+
+    def load_variavle(filename):
+        f = open(filename, 'rb')
+        v = pickle.load(f)
+        f.close()
+        return v
+
+    def read_input(filename):
+        f = open(filename, 'r')
+        lines = f.readlines()
+        f.close()
+        data = list()
+        for line in lines:
+            if "[LOST]" in line:
+                del data
+                print(line)
+                data = list()
+            data.append(line)
+        return data
 
 
-def load_variavle(filename):
-    f = open(filename, 'rb')
-    v = pickle.load(f)
-    f.close()
-    return v
-
-
-def read_input(filename):
-    f = open(filename, 'r')
-    lines = f.readlines()
-    f.close()
-    data = list()
-    for line in lines:
-        if "[LOST]" in line:
-            del data
-            print(line)
-            data = list()
-        data.append(line)
-    return data
-
-
-event_match = {
-    "sched_kthread_stop": re.compile("comm=(\S+) pid=(\d+)"),
-    "sched_kthread_stop_ret": re.compile("ret=(\d+)"),
-    "sched_kthread_work_execute_end": re.compile("work struct ([-+]?(0[xX])?[\dA-Fa-f]+): function (\S+)"),
-    "sched_kthread_work_execute_start": re.compile("work struct ([-+]?(0[xX])?[\dA-Fa-f]+): function (\S+)"),
-    "sched_kthread_work_queue_work": re.compile("work struct=([-+]?(0[xX])?[\dA-Fa-f]+) function=(\S+) worker=([-+]?(0[xX])?[\dA-Fa-f]+)"),
-    "sched_migrate_task": re.compile("comm=(\S+) pid=(\d+) prio=(\d+) orig_cpu=(\d+) dest_cpu=(\d+)"),
-    "sched_move_numa": re.compile("pid=(\d+) tgid=(\d+) ngid=(\d+) src_cpu=(\d+) src_nid=(\d+) dst_cpu=(\d+) dst_nid=(\d+)"),
-    "sched_pi_setprio": re.compile("comm=(\S+) pid=(\d+) oldprio=(\d+) newprio=(\d+)"),
-    "sched_process_exec": re.compile("filename=(\S+) pid=(\d+) old_pid=(\d+)"),
-    "sched_process_exit": re.compile("comm=(\S+) pid=(\d+) prio=(\d+)"),
-    "sched_process_fork": re.compile("comm=(\S+) pid=(\d+) child_comm=(\S+) child_pid=(\d+)"),
-    "sched_process_free": re.compile("comm=(\S+) pid=(\d+) prio=(\d+)"),
-    "sched_process_hang": re.compile("comm=(\S+) pid=(\d+)"),
-    "sched_process_wait": re.compile("comm=(\S+) pid=(\d+) prio=(\d+)"),
-    "sched_stat_blocked": re.compile("comm=(\S+) pid=(\d+) delay=(\d+) \[ns\]"),
-    "sched_stat_iowait": re.compile("comm=(\S+) pid=(\d+) delay=(\d+) \[ns\]"),
-    "sched_stat_runtime": re.compile("comm=(\S+) pid=(\d+) runtime=(\d+) \[ns\] vruntime=(\d+) \[ns\]"),
-    "sched_stat_sleep": re.compile("comm=(\S+) pid=(\d+) delay=(\d+) \[ns\]"),
-    "sched_stat_wait": re.compile("comm=(\S+) pid=(\d+) delay=(\d+) \[ns\]"),
-    "sched_stick_numa": re.compile("src_pid=(\d+) src_tgid=(\d+) src_ngid=(\d+) src_cpu=(\d+) src_nid=(\d+) dst_pid=(\d+) dst_tgid=(\d+) dst_ngid=(\d+) dst_cpu=(\d+) dst_nid=(\d+)"),
-    "sched_swap_numa": re.compile("src_pid=(\d+) src_tgid=(\d+) src_ngid=(\d+) src_cpu=(\d+) src_nid=(\d+) dst_pid=(\d+) dst_tgid=(\d+) dst_ngid=(\d+) dst_cpu=(\d+) dst_nid=(\d+)"),
-    "sched_switch": re.compile("prev_comm=(\S+) prev_pid=(\d+) prev_prio=(\d+) prev_state=(\S+) ==> next_comm=(\S+) next_pid=(\d+) next_prio=(\d+)"),
-    "sched_wait_task": re.compile("comm=(\S+) pid=(\d+) prio=(\d+)"),
-    "sched_wake_idle_without_ipi": re.compile("cpu=(\d+)"),
-    "sched_wakeup": re.compile("comm=(\S+) pid=(\d+) prio=(\d+) target_cpu=(\d+)"),
-    "sched_wakeup_new": re.compile("comm=(\S+) pid=(\d+) prio=(\d+) target_cpu=(\d+)"),
-    "sched_waking": re.compile("comm=(\S+) pid=(\d+) prio=(\d+) target_cpu=(\d+)"),
-    "irq_handler_entry": re.compile("irq=(\d+) name=(\S+)"),
-    "irq_handler_exit": re.compile("irq=(\d+) ret=(\S+)"),
-    "softirq_entry": re.compile("vec=(\d+) \[action=(\S+)\]"),
-    "softirq_exit": re.compile("vec=(\d+) \[action=(\S+)\]"),
-    "softirq_raise": re.compile("vec=(\d+) \[action=(\S+)\]"),
-    "perf": re.compile("(\S+ *\S+) * (-*\d+)\/(-*\d+) *\[(\d+)\] *(\d+\.\d+): *(\S+):(\S+):*"),
-}
-
-
-def stack_handle(line, priv):
-    key_word = line.split()
-    [stack_name_list, stack_addr_list] = priv
-    key_word_len = len(key_word)
-    if key_word_len == 3:
-        stack_name_list.append(key_word[1])
-        stack_addr_list.append(key_word[2])
-    elif key_word_len == 4:
-        stack_name_list.append(key_word[1])
-        stack_addr_list.append(key_word[3])
-    elif key_word_len == 2:
-        stack_name_list.append(key_word[1])
-        stack_addr_list.append(key_word[1])
-    else:
-        print("Error stack "+line)
-
-
-def cpu_clock_handle(line, priv):
-    [[stack_name_list, stack_addr_list],
-     [ustack_name_list, ustack_addr_list]] = priv
-    key_word = line.split()
-    key_word_len = len(key_word)
-    if key_word_len > 1:
-        if int(key_word[0], 16) > 0xf000000000000000:
+class event_opt:
+    def stack_handle(line, priv):
+        key_word = line.split()
+        [stack_name_list, stack_addr_list] = priv
+        key_word_len = len(key_word)
+        if key_word_len == 3:
             stack_name_list.append(key_word[1])
-            stack_addr_list.append(key_word[0])
+            stack_addr_list.append(key_word[2])
+        elif key_word_len == 4:
+            stack_name_list.append(key_word[1])
+            stack_addr_list.append(key_word[3])
+        elif key_word_len == 2:
+            stack_name_list.append(key_word[1])
+            stack_addr_list.append(key_word[1])
         else:
-            ustack_name_list.append(key_word[1])
-            ustack_addr_list.append(key_word[0])
-    elif key_word_len == 1:
-        if int(key_word[0], 16) > 0xf000000000000000:
-            stack_name_list.append(key_word[0])
-            stack_addr_list.append(key_word[0])
+            print("Error stack "+line)
+
+    def cpu_clock_handle(line, priv):
+        [[stack_name_list, stack_addr_list],
+         [ustack_name_list, ustack_addr_list]] = priv
+        key_word = line.split()
+        key_word_len = len(key_word)
+        if key_word_len > 1:
+            if int(key_word[0], 16) > 0xf000000000000000:
+                stack_name_list.append(key_word[1])
+                stack_addr_list.append(key_word[0])
+            else:
+                ustack_name_list.append(key_word[1])
+                ustack_addr_list.append(key_word[0])
+        elif key_word_len == 1:
+            if int(key_word[0], 16) > 0xf000000000000000:
+                stack_name_list.append(key_word[0])
+                stack_addr_list.append(key_word[0])
+            else:
+                ustack_name_list.append(key_word[0])
+                ustack_addr_list.append(key_word[0])
         else:
-            ustack_name_list.append(key_word[0])
-            ustack_addr_list.append(key_word[0])
-    else:
-        print("Error stack "+line)
+            print("Error stack "+line)
 
+    def null_init(ev):
+        return
 
-def null_init(ev):
-    return
+    def cpu_clock_init(ev):
+        ev.priv = [ev.kernel_stack, ev.user_stack]
+        return
 
+    def stack_init(ev):
+        ev.priv = [[], []]
+        if ev.event_name == "<stack trace>":
+            ev.is_stack = TRACE_STACK_KERNEL
+        else:
+            ev.is_stack = TRACE_STACK_USER
+        return
 
-def cpu_clock_init(ev):
-    ev.priv = [ev.kernel_stack, ev.user_stack]
-    return
+    def irq_init(ev):
+        irq_info = ev.priv
+        irq_num = irq_info[0]
+        if irq_num not in irq_list:
+            irq_ev_list = []
+            irq_list[irq_num] = irq_ev_list
+        else:
+            irq_ev_list = irq_list[irq_num]
+        irq_ev_list.append(ev)
+        return
 
+    def softirq_init(ev):
+        vec_info = ev.priv
+        vec_num = vec_info[0]
+        if vec_num not in vec_list:
+            vec_ev_list = []
+            vec_list[vec_num] = vec_ev_list
+        else:
+            vec_ev_list = vec_list[vec_num]
+        vec_ev_list.append(ev)
+        return
 
-def stack_init(ev):
-    ev.priv = [[], []]
-    if ev.event_name == "<stack trace>":
-        ev.is_stack = TRACE_STACK_KERNEL
-    else:
-        ev.is_stack = TRACE_STACK_USER
-    return
+    def null_handle(line, priv):
+        return
 
+    def null_timeline(ev):
+        return
 
-def irq_init(ev):
-    irq_info = ev.priv
-    irq_num = irq_info[0]
-    if irq_num not in irq_list:
-        irq_ev_list = []
-        irq_list[irq_num] = irq_ev_list
-    else:
-        irq_ev_list = irq_list[irq_num]
-    irq_ev_list.append(ev)
-    return
+    def null_insert_cpu(ev):
+        return
 
-
-def softirq_init(ev):
-    vec_info = ev.priv
-    vec_num = vec_info[0]
-    if vec_num not in vec_list:
-        vec_ev_list = []
-        vec_list[vec_num] = vec_ev_list
-    else:
-        vec_ev_list = vec_list[vec_num]
-    vec_ev_list.append(ev)
-    return
-
-
-def null_handle(line, priv):
-    return
-
-
-mod_type = {
-    "sched": ["sched_kthread_stop",
-              "sched_kthread_stop_ret",
-              "sched_kthread_work_execute_end",
-              "sched_kthread_work_execute_start",
-              "sched_kthread_work_queue_work",
-              "sched_migrate_task",
-              "sched_move_numa",
-              "sched_pi_setprio",
-              "sched_process_exec",
-              "sched_process_exit",
-              "sched_process_fork",
-              "sched_process_free",
-              "sched_process_hang",
-              "sched_process_wait",
-              "sched_stat_blocked",
-              "sched_stat_iowait",
-              "sched_stat_runtime",
-              "sched_stat_sleep",
-              "sched_stat_wait",
-              "sched_stick_numa",
-              "sched_swap_numa",
-              "sched_switch",
-              "sched_wait_task",
-              "sched_wake_idle_without_ipi",
-              "sched_wakeup",
-              "sched_wakeup_new",
-              "sched_waking"],
-    "irq": ["irq_handler_entry",
-            "irq_handler_exit",
-            "softirq_entry",
-            "softirq_exit",
-            "softirq_raise"],
-    "ftrace": ["ftrace",
-               "<stack trace>",
-               "<user stack trace>"],
-    "perf": ["perf",
-             "cpu-clock",
-             "cpu-cycles"]
-}
-
-
-class event_pre_opt:
     def __init__(self, mod_name='', init_op=null_init,
-                 handle_op=null_handle, ev_list=[]):
+                 handle_op=null_handle, timeline_op=null_timeline,
+                 insert_cpu_op=null_insert_cpu, ev_list=[]):
         self.mod_name = mod_name
         self.init_op = init_op
         self.handle_op = handle_op
         self.event_type_list = ev_list
+        self.timeline_op = timeline_op
+        self.insert_cpu_op = insert_cpu_op
 
 
 event_type = {
-    "sched_kthread_stop": event_pre_opt("sched"),
-    "sched_kthread_stop_ret": event_pre_opt("sched"),
-    "sched_kthread_work_execute_end": event_pre_opt("sched"),
-    "sched_kthread_work_execute_start": event_pre_opt("sched"),
-    "sched_kthread_work_queue_work": event_pre_opt("sched"),
-    "sched_migrate_task": event_pre_opt("sched"),
-    "sched_move_numa": event_pre_opt("sched"),
-    "sched_pi_setprio": event_pre_opt("sched"),
-    "sched_process_exec": event_pre_opt("sched"),
-    "sched_process_exit": event_pre_opt("sched"),
-    "sched_process_fork": event_pre_opt("sched"),
-    "sched_process_free": event_pre_opt("sched"),
-    "sched_process_hang": event_pre_opt("sched"),
-    "sched_process_wait": event_pre_opt("sched"),
-    "sched_stat_blocked": event_pre_opt("sched"),
-    "sched_stat_iowait": event_pre_opt("sched"),
-    "sched_stat_runtime": event_pre_opt("sched"),
-    "sched_stat_sleep": event_pre_opt("sched"),
-    "sched_stat_wait": event_pre_opt("sched"),
-    "sched_stick_numa": event_pre_opt("sched"),
-    "sched_swap_numa": event_pre_opt("sched"),
-    "sched_switch": event_pre_opt("sched"),
-    "sched_wait_task": event_pre_opt("sched"),
-    "sched_wake_idle_without_ipi": event_pre_opt("sched"),
-    "sched_wakeup": event_pre_opt("sched"),
-    "sched_wakeup_new": event_pre_opt("sched"),
-    "sched_waking": event_pre_opt("sched"),
-    "irq_handler_entry": event_pre_opt("irq",    irq_init),
-    "irq_handler_exit": event_pre_opt("irq",    irq_init),
-    "softirq_entry": event_pre_opt("irq",    softirq_init),
-    "softirq_exit": event_pre_opt("irq",    softirq_init),
-    "softirq_raise": event_pre_opt("irq",    softirq_init),
-    "<stack trace>": event_pre_opt("ftrace", stack_init),
-    "<user stack trace>": event_pre_opt("ftrace", stack_init),
-    "cpu-clock": event_pre_opt("perf",   cpu_clock_init, cpu_clock_handle),
-    "cpu-cycles": event_pre_opt("perf",   cpu_clock_init, cpu_clock_handle),
+    "sched_kthread_stop": event_opt("sched"),
+    "sched_kthread_stop_ret": event_opt("sched"),
+    "sched_kthread_work_execute_end": event_opt("sched"),
+    "sched_kthread_work_execute_start": event_opt("sched"),
+    "sched_kthread_work_queue_work": event_opt("sched"),
+    "sched_migrate_task": event_opt("sched"),
+    "sched_move_numa": event_opt("sched"),
+    "sched_pi_setprio": event_opt("sched"),
+    "sched_process_exec": event_opt("sched"),
+    "sched_process_exit": event_opt("sched"),
+    "sched_process_fork": event_opt("sched"),
+    "sched_process_free": event_opt("sched"),
+    "sched_process_hang": event_opt("sched"),
+    "sched_process_wait": event_opt("sched"),
+    "sched_stat_blocked": event_opt("sched"),
+    "sched_stat_iowait": event_opt("sched"),
+    "sched_stat_runtime": event_opt("sched"),
+    "sched_stat_sleep": event_opt("sched"),
+    "sched_stat_wait": event_opt("sched"),
+    "sched_stick_numa": event_opt("sched"),
+    "sched_swap_numa": event_opt("sched"),
+    "sched_switch": event_opt("sched"),
+    "sched_wait_task": event_opt("sched"),
+    "sched_wake_idle_without_ipi": event_opt("sched"),
+    "sched_wakeup": event_opt("sched"),
+    "sched_wakeup_new": event_opt("sched"),
+    "sched_waking": event_opt("sched"),
+    "irq_handler_entry": event_opt("irq",    event_opt.irq_init),
+    "irq_handler_exit": event_opt("irq",    event_opt.irq_init),
+    "softirq_entry": event_opt("irq",    event_opt.softirq_init),
+    "softirq_exit": event_opt("irq",    event_opt.softirq_init),
+    "softirq_raise": event_opt("irq",    event_opt.softirq_init),
+    "<stack trace>": event_opt("ftrace", event_opt.stack_init),
+    "<user stack trace>": event_opt("ftrace", event_opt.stack_init),
+    "cpu-clock": event_opt("perf",   event_opt.cpu_clock_init,
+                           event_opt.cpu_clock_handle),
+    "cpu-cycles": event_opt("perf",   event_opt.cpu_clock_init,
+                            event_opt.cpu_clock_handle),
 }
 
 
@@ -338,6 +262,79 @@ def event_type_init():
 
 
 class trace_event:
+    class trace_event_format:
+        event_match = {
+            "sched_kthread_stop": re.compile("comm=(.*) pid=(\d+)"),
+            "sched_kthread_stop_ret": re.compile("ret=(\d+)"),
+            "sched_kthread_work_execute_end": re.compile("work struct ([-+]?(0[xX])?[\dA-Fa-f]+): function (\S+)"),
+            "sched_kthread_work_execute_start": re.compile("work struct ([-+]?(0[xX])?[\dA-Fa-f]+): function (\S+)"),
+            "sched_kthread_work_queue_work": re.compile("work struct=([-+]?(0[xX])?[\dA-Fa-f]+) function=(\S+) worker=([-+]?(0[xX])?[\dA-Fa-f]+)"),
+            "sched_migrate_task": re.compile("comm=(.*) pid=(\d+) prio=(\d+) orig_cpu=(\d+) dest_cpu=(\d+)"),
+            "sched_move_numa": re.compile("pid=(\d+) tgid=(\d+) ngid=(\d+) src_cpu=(\d+) src_nid=(\d+) dst_cpu=(\d+) dst_nid=(\d+)"),
+            "sched_pi_setprio": re.compile("comm=(.*) pid=(\d+) oldprio=(\d+) newprio=(\d+)"),
+            "sched_process_exec": re.compile("filename=(\S+) pid=(\d+) old_pid=(\d+)"),
+            "sched_process_exit": re.compile("comm=(.*) pid=(\d+) prio=(\d+)"),
+            "sched_process_fork": re.compile("comm=(.*) pid=(\d+) child_comm=(.*) child_pid=(\d+)"),
+            "sched_process_free": re.compile("comm=(.*) pid=(\d+) prio=(\d+)"),
+            "sched_process_hang": re.compile("comm=(.*) pid=(\d+)"),
+            "sched_process_wait": re.compile("comm=(.*) pid=(\d+) prio=(\d+)"),
+            "sched_stat_blocked": re.compile("comm=(.*) pid=(\d+) delay=(\d+) \[ns\]"),
+            "sched_stat_iowait": re.compile("comm=(.*) pid=(\d+) delay=(\d+) \[ns\]"),
+            "sched_stat_runtime": re.compile("comm=(.*) pid=(\d+) runtime=(\d+) \[ns\] vruntime=(\d+) \[ns\]"),
+            "sched_stat_sleep": re.compile("comm=(.*) pid=(\d+) delay=(\d+) \[ns\]"),
+            "sched_stat_wait": re.compile("comm=(.*) pid=(\d+) delay=(\d+) \[ns\]"),
+            "sched_stick_numa": re.compile("src_pid=(\d+) src_tgid=(\d+) src_ngid=(\d+) src_cpu=(\d+) src_nid=(\d+) dst_pid=(\d+) dst_tgid=(\d+) dst_ngid=(\d+) dst_cpu=(\d+) dst_nid=(\d+)"),
+            "sched_swap_numa": re.compile("src_pid=(\d+) src_tgid=(\d+) src_ngid=(\d+) src_cpu=(\d+) src_nid=(\d+) dst_pid=(\d+) dst_tgid=(\d+) dst_ngid=(\d+) dst_cpu=(\d+) dst_nid=(\d+)"),
+            "sched_switch": re.compile("prev_comm=(.*) prev_pid=(\d+) prev_prio=(\d+) prev_state=(\S+) ==> next_comm=(.*) next_pid=(\d+) next_prio=(\d+)"),
+            "sched_wait_task": re.compile("comm=(.*) pid=(\d+) prio=(\d+)"),
+            "sched_wake_idle_without_ipi": re.compile("cpu=(\d+)"),
+            "sched_wakeup": re.compile("comm=(.*) pid=(\d+) prio=(\d+) target_cpu=(\d+)"),
+            "sched_wakeup_new": re.compile("comm=(.*) pid=(\d+) prio=(\d+) target_cpu=(\d+)"),
+            "sched_waking": re.compile("comm=(.*) pid=(\d+) prio=(\d+) target_cpu=(\d+)"),
+            "irq_handler_entry": re.compile("irq=(\d+) name=(\S+)"),
+            "irq_handler_exit": re.compile("irq=(\d+) ret=(\S+)"),
+            "softirq_entry": re.compile("vec=(\d+) \[action=(\S+)\]"),
+            "softirq_exit": re.compile("vec=(\d+) \[action=(\S+)\]"),
+            "softirq_raise": re.compile("vec=(\d+) \[action=(\S+)\]"),
+            "perf_script": re.compile("(.*) * (-*\d+)\/(-*\d+) *\[(\d+)\] *(\d+\.\d+): *(\S+):(\S+):*"),
+            "ftrace": re.compile("(.*)\-(\d+) *\( *(\d+)\) *\[(\d+)\] *(\S+) *(\S+): *(\S+):"),
+        }
+
+        def unknwon_type(self, event_name, line):
+            return
+
+        def format_event(self, event_name, line):
+            if event_name not in self.event_match:
+                return self.unknwon_type(event_name, line)
+            pattern = self.event_match[event_name]
+            match = pattern.match(line)
+            if match is not None:
+                return match.groups()
+            else:
+                print(event_name, line)
+                return
+
+        def format_head(self, format_type, line):
+            if format_type == TRACE_FORMAT_TYPE_FTRACE:
+                event_name = 'ftrace'
+            elif format_type == TRACE_FORMAT_TYPE_PERF_SCRIPT:
+                event_name = 'perf_script'
+            elif format_type == TRACE_FORMAT_TYPE_PERF_JSON:
+                event_name = 'perf_json'
+            else:
+                return
+            if event_name in self.event_match:
+                pattern = self.event_match[event_name]
+                match = pattern.match(line)
+                if match is not None:
+                    (start, end) = match.span()
+                    info = line[end: -1].strip()
+                    result = list(match.groups())
+                    result.append(info)
+                    return result
+            print(format_type, line)
+            return
+
     def init_stack(self):
         if self.cpu not in cpu_list:
             return
@@ -429,15 +426,9 @@ class trace_event:
             (start, end) = re.search(self.event_name, line).span()
             opt.event_type_list.append(self)
             info = line[end + 2: -1]
-            if self.event_name not in event_match:
-                self.priv = info
-                opt.init_op(self)
-                self.init_common()
-                return
-            pattern = event_match[self.event_name]
-            match = pattern.match(info)
+            match = self.format.format_event(self.event_name, info)
             if match is not None:
-                self.priv = match.groups()
+                self.priv = match
                 opt.init_op(self)
             else:
                 self.priv = info
@@ -498,12 +489,11 @@ class trace_event:
         elif line[0] == '\n':
             self.available = TRACE_RETURN_COMMENT
             return
-        pattern = event_match['perf']
-        match = pattern.match(line)
-        if match is None:
+        perf_hand = self.format.format_head(
+            TRACE_FORMAT_TYPE_PERF_SCRIPT, line)
+        if perf_hand is None:
             self.available = TRACE_RETURN_FALSE
             return
-        perf_hand = match.groups()
         # print(perf_hand)
         self.is_stack = TRACE_STACK_NOT
         self.kernel_stack = [[], []]
@@ -528,18 +518,11 @@ class trace_event:
             self.event_name = perf_hand[PERF_SUBEVENT_INDEX].strip(':')
         if self.event_name in event_type:
             opt = event_type[self.event_name]
-            (start, end) = match.span()
             opt.event_type_list.append(self)
-            info = line[end: -1].strip()
-            if self.event_name not in event_match:
-                self.priv = info
-                opt.init_op(self)
-                self.init_common()
-                return
-            pattern = event_match[self.event_name]
-            match = pattern.match(info)
+            info = perf_hand[-1]
+            match = self.format.format_event(self.event_name, info)
             if match is not None:
-                self.priv = match.groups()
+                self.priv = match
                 opt.init_op(self)
             else:
                 self.priv = info
@@ -550,6 +533,7 @@ class trace_event:
 
     def __init__(self, line, format_type):
         '''print(line, format_type)'''
+        self.format = self.trace_event_format()
         self.format_type = format_type
         if format_type == TRACE_FORMAT_TYPE_FTRACE:
             self.ftrace_event(line)
@@ -791,165 +775,161 @@ def reset_resource():
     timestamp_end = -1.0
 
 
-def event_type_priv_max(event="<user stack trace>"):
-    if event not in event_type:
-        print("Event %s not in event_type." % event)
-        return
-    opt = event_type[event]
-    max_size = 0
-    for ev in opt.event_type_list:
-        if max_size < len(ev.priv):
-            max_size = len(ev.priv)
-    print("%s max_size is %d." % (event, max_size))
+class debug:
+    def event_type_priv_max(event="<user stack trace>"):
+        if event not in event_type:
+            print("Event %s not in event_type." % event)
+            return
+        opt = event_type[event]
+        max_size = 0
+        for ev in opt.event_type_list:
+            if max_size < len(ev.priv):
+                max_size = len(ev.priv)
+        print("%s max_size is %d." % (event, max_size))
 
+    def event_type_print_priv():
+        for name in event_type:
+            opt = event_type[name]
+            if len(opt.event_type_list) != 0:
+                print(name, opt.event_type_list[0].priv)
+            else:
+                print(name)
 
-def event_type_print_priv():
-    for name in event_type:
-        opt = event_type[name]
-        if len(opt.event_type_list) != 0:
-            print(name, opt.event_type_list[0].priv)
-        else:
-            print(name)
+    def event_check_stack(data, te_list):
+        te_len = len(te_list)
+        for i in range(te_len):
+            if te_list[i].event_name == "<stack trace>" and \
+              te_list[i].event_name != "<user stack trace>":
+                print(te_list[i].timestamp)
 
+    def event_stack_stat(te_list):
+        te_len = len(te_list)
+        stack_stat_list = {}
+        for i in range(te_len):
+            te = te_list[i]
+            stat = te.state
+            if stat[2] != '.':
+                continue
+            hash_id = te.kernel_stack_hash
+            if hash_id in stack_stat_list:
+                [stack, stack_num] = stack_stat_list[hash_id]
+                stack_stat_list[hash_id] = [stack, stack_num + 1]
+            else:
+                stack_stat_list[hash_id] = [te.kernel_stack.priv, 1]
+        for s in stack_stat_list:
+            print(stack_stat_list[s][1], stack_stat_list[s][0][0])
+        return stack_stat_list
 
-def event_check_stack(data, te_list):
-    te_len = len(te_list)
-    for i in range(te_len):
-        if te_list[i].event_name == "<stack trace>" and \
-          te_list[i].event_name != "<user stack trace>":
-            print(te_list[i].timestamp)
-
-
-def event_stack_stat(te_list):
-    te_len = len(te_list)
-    stack_stat_list = {}
-    for i in range(te_len):
-        te = te_list[i]
-        stat = te.state
-        if stat[2] != '.':
-            continue
-        hash_id = te.kernel_stack_hash
-        if hash_id in stack_stat_list:
-            [stack, stack_num] = stack_stat_list[hash_id]
-            stack_stat_list[hash_id] = [stack, stack_num + 1]
-        else:
-            stack_stat_list[hash_id] = [te.kernel_stack.priv, 1]
-    for s in stack_stat_list:
-        print(stack_stat_list[s][1], stack_stat_list[s][0][0])
-    return stack_stat_list
-
-
-def print_all_te(trace_list):
-    for te in trace_list:
-        print('%d\t%08X %s %s|%s' % (stack_hash_list[te.stack_hash], abs(
-            te.stack_hash), te.raw.strip(), te.kernel_stack.priv[0],
-            te.user_stack.priv[0]))
-
-
-def print_all_te_irq(trace_list):
-    for te in trace_list:
-        if len(te.kernel_stack[0]) > 0:
-            te.kernel_stack[0].reverse()
-        if len(te.user_stack[0]) > 0:
-            te.user_stack[0].reverse()
-        print('%s\t%s\t%s\t%d, %s, %s' % (te.state, te.event_name,
-              te.tid, te.cpu, te.kernel_stack[0], te.user_stack[0]))
-        if len(te.kernel_stack[0]) > 0:
-            te.kernel_stack[0].reverse()
-        if len(te.user_stack[0]) > 0:
-            te.user_stack[0].reverse()
-
-
-def print_all_cpu_te(cpu_list):
-    for i in range(4):
-        trace_list = cpu_list[i]
+    def print_all_te(trace_list):
         for te in trace_list:
-            print(te.raw.strip())
+            print('%d\t%08X %s %s|%s' % (stack_hash_list[te.stack_hash], abs(
+                te.stack_hash), te.raw.strip(), te.kernel_stack.priv[0],
+                te.user_stack.priv[0]))
+
+    def print_all_te_irq(trace_list):
+        for te in trace_list:
+            if len(te.kernel_stack[0]) > 0:
+                te.kernel_stack[0].reverse()
+            if len(te.user_stack[0]) > 0:
+                te.user_stack[0].reverse()
+            print('%s\t%s\t%s\t%d, %s, %s' % (te.state, te.event_name,
+                  te.tid, te.cpu, te.kernel_stack[0], te.user_stack[0]))
+            if len(te.kernel_stack[0]) > 0:
+                te.kernel_stack[0].reverse()
+            if len(te.user_stack[0]) > 0:
+                te.user_stack[0].reverse()
+
+    def print_all_cpu_te(cpu_list):
+        for i in range(4):
+            trace_list = cpu_list[i]
+            for te in trace_list:
+                print(te.raw.strip())
+
+    def print_all_time(stat_t):
+        for i in range(len(stat_t) - 1):
+            print(stat_t[i + 1]-stat_t[i])
+
+    def print_time(stat_t):
+        stat_t.append(time.perf_counter())
+        print(stat_t[len(stat_t) - 1]-stat_t[-2])
 
 
-"""
-perf-exec   27804/27804   [000]   959.661520: cpu-clock:ppp:                         
-	ffffffffa85ba87a unmap_page_range+0x38a ([kernel.kallsyms])
-	ffffffffa85baa9e unmap_single_vma+0x7e ([kernel.kallsyms])
-	ffffffffa85badf5 unmap_vmas+0xe5 ([kernel.kallsyms])
-	ffffffffa85cab5a exit_mmap+0xda ([kernel.kallsyms])
-	ffffffffa82e4218 __mmput+0x48 ([kernel.kallsyms])
-	ffffffffa82e4351 mmput+0x31 ([kernel.kallsyms])
-	ffffffffa8683d56 exec_mmap+0x176 ([kernel.kallsyms])
-	ffffffffa8686e2b begin_new_exec+0x11b ([kernel.kallsyms])
-	ffffffffa870fa38 load_elf_binary+0x2d8 ([kernel.kallsyms])
-	ffffffffa8683fea search_binary_handler+0xda ([kernel.kallsyms])
-	ffffffffa86844c6 exec_binprm+0x56 ([kernel.kallsyms])
-	ffffffffa868634c bprm_execve.part.0+0x18c ([kernel.kallsyms])
-	ffffffffa868645e bprm_execve+0x5e ([kernel.kallsyms])
-	ffffffffa8686648 do_execveat_common.isra.0+0x198 ([kernel.kallsyms])
-	ffffffffa86869a7 __x64_sys_execve+0x37 ([kernel.kallsyms])
-	ffffffffa928c1ac do_syscall_64+0x5c ([kernel.kallsyms])
-	ffffffffa94000aa entry_SYSCALL_64_after_hwframe+0x72 ([kernel.kallsyms])
+class event_to_perf:
+    def print_evnt(te):
+        if te.pid == "-------":
+            print('%s\t0\t[00%d]\t%0.06f:\t1000\t%s:' %
+                  (te.name, te.cpu, te.timestamp, te.event_name))
+        else:
+            print('%s\t%s\t[00%d]\t%0.06f:\t1000\t%s:' %
+                  (te.name, te.pid, te.cpu, te.timestamp, te.event_name))
+        if len(te.kernel_stack[0]) > 0:
+            for i in range(len(te.kernel_stack[0])):
+                stack = te.kernel_stack[0][i]
+                addr = te.kernel_stack[1][i]
+                print("\t%s %s ([kernel.kallsyms])" %
+                      (addr.strip('<').strip('>'), stack))
+        if len(te.user_stack[0]) > 0:
+            for i in range(len(te.user_stack[0])):
+                stack = te.user_stack[0][i]
+                addr = te.user_stack[1][i]
+                print("\t%s %s (%s)" % (addr.strip('<').strip('>'),
+                                        stack, te.name))
+        print("")
 
-swapper       0/0       [001]   959.661867: cpu-clock:ppp:                         
-"""
-
-
-def event_to_perf(te):
-    if te.pid == "-------":
-        print('%s\t0\t[00%d]\t%0.06f:\t1000\t%s:' %
-              (te.name, te.cpu, te.timestamp, te.event_name))
-    else:
-        print('%s\t%s\t[00%d]\t%0.06f:\t1000\t%s:' %
-              (te.name, te.pid, te.cpu, te.timestamp, te.event_name))
-    if len(te.kernel_stack[0]) > 0:
-        for i in range(len(te.kernel_stack[0])):
-            stack = te.kernel_stack[0][i]
-            addr = te.kernel_stack[1][i]
-            print("\t%s %s ([kernel.kallsyms])" %
-                  (addr.strip('<').strip('>'), stack))
-    if len(te.user_stack[0]) > 0:
-        for i in range(len(te.user_stack[0])):
-            stack = te.user_stack[0][i]
-            addr = te.user_stack[1][i]
-            print("\t%s %s (%s)" % (addr.strip('<').strip('>'),
-                                    stack, te.name))
-    print("")
-
-
-def conver_to_perf():
-    for te in trace_list:
-        event_to_perf(te)
-
-
-class trace_event_json_item:
-    def __init__(self):
-        self.name = str('')
-        self.args = {}
-        self.cat = str('')
-        self.pid = int(0)
-        self.tid = int(0)
-        self.ts = int(0)
-        self.dur = int(0)
-        self.ph = str('')
-        self.bind_id = str('')
-        self.flow_in = bool(0)
-        self.flow_out = bool(0)
+    def conver_to_perf(trace_list):
+        for te in trace_list:
+            event_to_perf(te)
 
 
 class trace_event_json:
-    def get_json_tree(self):
+    class trace_event_json_item:
+        def __init__(self):
+            self.name = str('')
+            self.args = {}
+            self.cat = str('')
+            self.pid = int(0)
+            self.tid = int(0)
+            self.ts = int(0)
+            self.dur = int(0)
+            self.ph = str('')
+            self.bind_id = str('')
+            self.flow_in = bool(0)
+            self.flow_out = bool(0)
+
+        def format_pidname_metadata(self, name, pid, tid):
+            self.name = "process_name"
+            self.args['name'] = name
+            self.pid = pid
+            self.tid = tid
+            self.ts = int(0)
+            self.cat = '__metadata'
+            self.ph = "M"
+
+        def format_tidname_metadata(self, name, pid, tid):
+            self.name = "thread_name"
+            self.args['name'] = name
+            self.pid = pid
+            self.tid = tid
+            self.ts = int(0)
+            self.cat = '__metadata'
+            self.ph = "M"
+
+    def get_trace_event_format(self):
         return self.json_tree
 
-    def clean_json_tree(self):
+    def clean_trace_event_format(self):
         self.json_tree = {}
         self.json_tree['traceEvents'] = list()
         self.json_tree_result = [self.json_tree]
 
-    def save_json(self, output=OUTPUT_FILE):
+    def save_trace_event_format(self, output=OUTPUT_FILE):
         fd = open(output, 'w+')
         fd.write(json.dumps(self.json_tree_result, indent=0))
 
     def __init__(self):
-        self.clean_json_tree()
+        self.clean_trace_event_format()
 
-    def format_item(self, item):
+    def insert_item(self, item):
         json_item = dict()
         json_item['name'] = item.name
         json_item['args'] = item.args
@@ -966,99 +946,39 @@ class trace_event_json:
             json_item['flow_out'] = item.flow_out
         self.json_tree['traceEvents'].append(json_item)
 
-    def format_pidname_item(self, name, pid, tid):
-        item = trace_event_json()
-        item.name = "process_name"
-        item.args['name'] = name
-        item.pid = pid
-        item.tid = tid
-        item.ts = int(0)
-        item.cat = '__metadata'
-        item.ph = "M"
-        self.format_item(item)
+    def alloc_item(self):
+        return self.trace_event_json_item()
 
-    def format_tidname_item(self, name, pid, tid):
-        item = trace_event_json()
-        item.name = "thread_name"
-        item.args['name'] = name
-        item.pid = pid
-        item.tid = tid
-        item.ts = int(0)
-        item.cat = '__metadata'
-        item.ph = "M"
-        self.format_item(item)
 
-    def json_metadata_thread_name(self, pid_tid_list):
+class trace_event_timeline_database:
+    def __init__(self, output_format):
+        self.output = trace_event_json()
+
+    def format_thread_name_metadata(self, pid_tid_list):
         for pid in pid_tid_list:
             tid_id_list = pid_tid_list[pid]
             for tid in tid_id_list:
                 pid_name = tid_id_list[tid]
+                item = self.output.alloc_item()
                 if tid != "name":
-                    self.format_tidname_item(pid_name, pid, tid)
+                    item.format_tidname_metadata(pid_name, pid, tid)
                 else:
-                    self.format_pidname_item(pid_name, pid, pid)
+                    item.format_pidname_metadata(pid_name, pid, pid)
+                self.output.insert_item(item)
 
-
-def null_timeline(ev):
-    return
-
-
-def null_insert_cpu(ev):
-    return
-
-
-class event_post_opt:
-    def __init__(self, timeline_op=null_timeline,
-                 insert_cpu_op=null_insert_cpu):
-        self.timeline_op = timeline_op
-        self.insert_cpu_op = insert_cpu_op
-
-
-event_post_type = {
-    "sched_kthread_stop": event_post_opt(),
-    "sched_kthread_stop_ret": event_post_opt(),
-    "sched_kthread_work_execute_end": event_post_opt(),
-    "sched_kthread_work_execute_start": event_post_opt(),
-    "sched_kthread_work_queue_work": event_post_opt(),
-    "sched_migrate_task": event_post_opt(),
-    "sched_move_numa": event_post_opt(),
-    "sched_pi_setprio": event_post_opt(),
-    "sched_process_exec": event_post_opt(),
-    "sched_process_exit": event_post_opt(),
-    "sched_process_fork": event_post_opt(),
-    "sched_process_free": event_post_opt(),
-    "sched_process_hang": event_post_opt(),
-    "sched_process_wait": event_post_opt(),
-    "sched_stat_blocked": event_post_opt(),
-    "sched_stat_iowait": event_post_opt(),
-    "sched_stat_runtime": event_post_opt(),
-    "sched_stat_sleep": event_post_opt(),
-    "sched_stat_wait": event_post_opt(),
-    "sched_stick_numa": event_post_opt(),
-    "sched_swap_numa": event_post_opt(),
-    "sched_switch": event_post_opt(),
-    "sched_wait_task": event_post_opt(),
-    "sched_wake_idle_without_ipi": event_post_opt(),
-    "sched_wakeup": event_post_opt(),
-    "sched_wakeup_new": event_post_opt(),
-    "sched_waking": event_post_opt(),
-    "irq_handler_entry": event_post_opt(),
-    "irq_handler_exit": event_post_opt(),
-    "softirq_entry": event_post_opt(),
-    "softirq_exit": event_post_opt(),
-    "softirq_raise": event_post_opt(),
-    "<stack trace>": event_post_opt(),
-    "<user stack trace>": event_post_opt(),
-    "cpu-clock": event_post_opt(),
-    "cpu-cycles": event_post_opt(),
-}
 
 if __name__ == '__main__':
-    data = read_input(INPUT_FTRACE_FILE)
+    stat_t = [time.perf_counter()]
+    data = file_opt.read_input(INPUT_FTRACE_FILE)
+    debug.print_time(stat_t)
     te_list = parse_data(data, format_type=TRACE_FORMAT_TYPE_FTRACE)
-    data = read_input(INPUT_PERF_SCRIPT)
+    debug.print_time(stat_t)
+    data = file_opt.read_input(INPUT_PERF_SCRIPT)
+    debug.print_time(stat_t)
     te_list = parse_data(data, format_type=TRACE_FORMAT_TYPE_PERF_SCRIPT)
+    debug.print_time(stat_t)
     init_global()
+    debug.print_time(stat_t)
     # event_stack_stat(trace_list)
     # print_all_te(trace_list)
     # print_all_te_irq(trace_list)
