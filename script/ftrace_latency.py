@@ -147,7 +147,7 @@ class trace_event_format:
         "softirq_exit": re.compile("vec=(\d+) \[action=(\S+)\]"),
         "softirq_raise": re.compile("vec=(\d+) \[action=(\S+)\]"),
         "perf_script": re.compile("(.*) * (-*\d+)\/(-*\d+) *\[(\d+)\] *(\d+\.\d+): *(\S+):(\S+):*"),
-        "ftrace": re.compile("(.*)\-(\d+) *\( *(\d+)\) *\[(\d+)\] *(\S+) *(\S+): *(\S+):"),
+        "ftrace": re.compile("(.{16})\-(\d+) *\( *(\S+)\) *\[(\d+)\] *(\S+) *(\S+): *(\S+)"),
     }
 
     def unknwon_type(self, event_name, line):
@@ -269,7 +269,7 @@ class trace_event:
             self.available = TRACE_RETURN_FALSE
             return
         index = self.format_event_index[self.format_type]
-        self.name = head[index[NAME_INDEX]]
+        self.name = head[index[NAME_INDEX]].strip()
         self.tid = head[index[TID_INDEX]]
         self.pid = head[index[PID_INDEX]]
         self.fixed_pid_tid()
@@ -278,7 +278,7 @@ class trace_event:
             self.state = head[index[STATE_INDEX]]
         self.timestamp = int(head[index[TIMESTAMP_INDEX]].replace('.', ''))
         if index[SUBEVENT_INDEX] != -1:
-            self.event_name = head[index[EVENT_INDEX]]
+            self.event_name = head[index[EVENT_INDEX]].strip(':')
         else:
             # TODO do not think about perf event
             self.event_name = head[index[EVENT_INDEX]].strip(':')
@@ -427,7 +427,7 @@ class trace_event_json:
 
 class trace_event_database:
     class event_opt:
-        def stack_post_init(self, line, priv):
+        def ftrace_insert_stack(self, line, priv):
             key_word = line.split()
             [stack_name_list, stack_addr_list] = priv
             key_word_len = len(key_word)
@@ -443,7 +443,7 @@ class trace_event_database:
             else:
                 print("Error stack "+line)
 
-        def cpu_clock_post_init(self, line, priv):
+        def perf_insert_stack(self, line, priv):
             [[stack_name_list, stack_addr_list],
              [ustack_name_list, ustack_addr_list]] = priv
             key_word = line.split()
@@ -468,13 +468,13 @@ class trace_event_database:
         def null_pre_init(self, ev):
             return
 
-        def cpu_clock_pre_init(self, ev):
+        def perf_pre_init(self, ev):
             ev.priv = [ev.kernel_stack, ev.user_stack]
             return
 
-        def stack_pre_init(self, ev):
+        def ftrace_stack_pre_init(self, ev):
             ev.priv = [[], []]
-            if ev.event_name == "<stack trace>":
+            if ev.event_name == "<stack":
                 ev.is_stack = TRACE_STACK_KERNEL
             else:
                 ev.is_stack = TRACE_STACK_USER
@@ -502,7 +502,7 @@ class trace_event_database:
             vec_ev_list.append(ev)
             return
 
-        def null_post_init(self, line, priv):
+        def null_insert_stack(self, line, priv):
             return
 
         def null_timeline(self, ev):
@@ -512,22 +512,23 @@ class trace_event_database:
             return
 
         def __init__(self, database, mod_name='', pre_init_opt=null_pre_init,
-                     post_init_opt=null_post_init, timeline_opt=null_timeline,
+                     insert_stack_opt=null_insert_stack,
+                     timeline_opt=null_timeline,
                      insert_cpu_opt=null_insert_cpu):
             self.mod_name = mod_name
             self.pre_init_opt = pre_init_opt
-            self.post_init_opt = post_init_opt
+            self.insert_stack_opt = insert_stack_opt
             self.timeline_opt = timeline_opt
             self.insert_cpu_opt = insert_cpu_opt
             self.db = database
 
     class pre_processing:
-        def post_init(self, te, line):
+        def insert_stack(self, te, line):
             if te.available != TRACE_RETURN_TRUE:
                 return
             if te.event_name in self.db.event_type:
                 opt = self.db.event_type[te.event_name]
-                opt.post_init_opt(self, line, te.priv)
+                opt.insert_stack_opt(self, line, te.priv)
 
         def pre_init(self, te, line):
             if te.available != TRACE_RETURN_TRUE:
@@ -598,7 +599,7 @@ class trace_event_database:
                     continue
                 if te.get_available() == TRACE_RETURN_STACK:
                     if last_te.get_available() == TRACE_RETURN_TRUE:
-                        self.post_init(last_te, line)
+                        self.insert_stack(last_te, line)
                         continue
                     else:
                         print(data[i], "TRACE_RETURN_FALSE")
@@ -606,7 +607,6 @@ class trace_event_database:
                 last_te = te
                 self.pre_init(te, line)
                 self.init_common(te)
-                self.post_init(te, line)
                 self.db.te_list.append(te)
 
         def parse_perf_json(self, input_filename=INPUT_PERF_JSON):
@@ -621,7 +621,6 @@ class trace_event_database:
                 self.db.te_list.append(te)
                 self.pre_init(te, json_te)
                 self.init_normal(te)
-                self.post_init(te, json_te)
             fd.close()
             del json_data
 
@@ -850,19 +849,19 @@ class trace_event_database:
                                            self.event_opt.softirq_pre_init),
             "softirq_raise": self.event_opt(self, "irq",
                                             self.event_opt.softirq_pre_init),
-            "<stack trace>": self.event_opt(self, "ftrace",
-                                            self.event_opt.stack_pre_init,
-                                            self.event_opt.stack_post_init),
-            "<user stack trace>":
+            "<stack": self.event_opt(self, "ftrace",
+                                     self.event_opt.ftrace_stack_pre_init,
+                                     self.event_opt.ftrace_insert_stack),
+            "<user":
                 self.event_opt(self, "ftrace",
-                               self.event_opt.stack_pre_init,
-                               self.event_opt.stack_post_init),
+                               self.event_opt.ftrace_stack_pre_init,
+                               self.event_opt.ftrace_insert_stack),
             "cpu-clock": self.event_opt(self, "perf",
-                                        self.event_opt.cpu_clock_pre_init,
-                                        self.event_opt.cpu_clock_post_init),
+                                        self.event_opt.perf_pre_init,
+                                        self.event_opt.perf_insert_stack),
             "cpu-cycles": self.event_opt(self, "perf",
-                                         self.event_opt.cpu_clock_pre_init,
-                                         self.event_opt.cpu_clock_post_init),
+                                         self.event_opt.perf_pre_init,
+                                         self.event_opt.perf_insert_stack),
         }
 
     def get_handle(self, event_name):
