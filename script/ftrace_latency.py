@@ -788,13 +788,13 @@ class trace_event_database:
         def impl_cpu_thread(self):
             for ev in self.db.trace_list:
                 handle = self.db.get_handle(ev)
-                handle.cpu_thread_opt(ev)
+                handle.cpu_thread_opt(self, ev)
 
         def impl_timeline_thread(self):
             for ev_list in self.db.cpu_list:
                 for ev in ev_list:
                     handle = self.db.get_handle(ev)
-                    handle.timeline_opt(ev)
+                    handle.timeline_opt(self, ev)
 
         def __init__(self, database):
             self.db = database
@@ -1052,20 +1052,20 @@ class trace_event_database:
 
     def get_thread_cpu(self, ev):
         cpu_thread = self.cpu_tid + ev.cpu
-        if cpu_thread in self.thread_list[LANGRAH_METADATA_CPU]:
-            return self.thread_list[LANGRAH_METADATA_CPU][cpu_thread]
+        if cpu_thread in self.thread_list[self.cpu_tid]:
+            return self.thread_list[self.cpu_tid][cpu_thread]
         return
 
     def get_thread_irq(self, irq):
         irq_thread = self.irq_tid + irq
-        if irq_thread in self.thread_list[LANGRAH_METADATA_IRQ]:
-            return self.thread_list[LANGRAH_METADATA_IRQ][irq_thread]
+        if irq_thread in self.thread_list[self.irq_tid]:
+            return self.thread_list[self.irq_tid][irq_thread]
         return
 
     def get_thread_softirq(self, softirq):
         softirq_thread = self.softirq_tid + softirq
-        if softirq_thread in self.thread_list[LANGRAH_METADATA_SOFTIRQ]:
-            return self.thread_list[LANGRAH_METADATA_SOFTIRQ][softirq_thread]
+        if softirq_thread in self.thread_list[self.softirq_tid]:
+            return self.thread_list[self.softirq_tid][softirq_thread]
         return
 
     def get_handle(self, ev):
