@@ -130,6 +130,7 @@ EVENT_CAT_TOP = "toplevel"
 EVENT_CAT_EVNET = "ipc"
 EVENT_CAT_STACK = "cc"
 EVENT_CAT_UNKWON = "UNKWON"
+EVENT_FIRST = "first"
 
 
 class file_opt:
@@ -245,8 +246,11 @@ class trace_event_format:
         if "??" in function_name:
             function_name = "user_symbol_" + exec_file.split('/')[-1]
         user_symbol_index = "%s[+%s]" % (exec_file, function_addr)
-        self.db.user_symbol_list[user_symbol_index] = [
+        self.user_symbol_list[user_symbol_index] = [
             function_name, function_addr]
+
+    def __init__(self):
+        self.user_symbol_list = {}
 
 
 class trace_event_input:
@@ -415,10 +419,11 @@ class trace_event_output_item:
         self.pid = int(0)
         self.tid = int(0)
         self.ts = int(0)
-        self.dur = int(0)
-        self.bind_id = int(0)
+        self.dur = int(-1)
+        self.bind_id = str('')
         self.ev = ev
         self.cat = EVENT_CAT_UNKWON
+        self.sched_status = SCHED_NO_LOAD
         self.stack_list = []
 
     def insert_stack(self, item):
@@ -427,18 +432,17 @@ class trace_event_output_item:
 
 
 class trace_event_thread_stat:
-    def __init__(self, name, tid):
+    def __init__(self, item, name, tid):
         self.call_list = []
         self.callee_list = []
         self.name = name
         self.tid = tid
         self.sched_status = SCHED_NO_LOAD
-        self.ev_list = []
+        self.ev_list = [item]
         self.running_item = self
 
     def insert_top(self, item):
         self.ev_list.append(item)
-        self.stack_list.append(item)
         if self.running_item != self:
             self.running_item = self
         else:
@@ -471,7 +475,7 @@ class trace_event_thread_stat:
 class trace_event_output_tef:
     class trace_event_output_item_tef(trace_event_output_item):
         def __init__(self, ev):
-            super().__init__()
+            super().__init__(ev)
             self.cat = str('')
             self.ph = str('')
             self.flow_in = bool(0)
@@ -646,6 +650,16 @@ class trace_event_database:
         def alloc_item(self, ev):
             return self.output.alloc_item(ev)
 
+        def alloc_first_item(self):
+            item = self.output.alloc_item(EVENT_FIRST)
+            item.ts = self.db.timestamp_start
+
+        def is_first_item(self, item):
+            if item.ev == EVENT_FIRST:
+                return True
+            else:
+                return False
+
     class analysis:
         def get_irq_name(self, event_name, irq_ev):
             (irq_num, irq_name) = irq_ev[0].priv
@@ -657,27 +671,31 @@ class trace_event_database:
 
         def irq_to_thread_name(self, irq_list_name,
                                event_name, pid_cur, irq_ev_list):
-            stat = trace_event_thread_stat(irq_list_name, pid_cur)
+            item = self.db.post_opts.alloc_first_item()
+            stat = trace_event_thread_stat(item, irq_list_name, pid_cur)
             irq_pid_list = {STAT_KEY: stat}
             irq_pid_max = pid_cur
             for irq_id in irq_ev_list.keys():
                 irq_pid = pid_cur + int(irq_id)
                 irq_pid_max = max(irq_pid_max, irq_pid)
+                item = self.db.post_opts.alloc_first_item()
                 irq_name = self.get_irq_name(event_name, irq_ev_list[irq_id])
-                stat = trace_event_thread_stat(irq_name, irq_pid)
+                stat = trace_event_thread_stat(item, irq_name, irq_pid)
                 irq_pid_list[irq_pid] = stat
             self.db.thread_list[pid_cur] = irq_pid_list
             return irq_pid_max
 
         def cpu_to_thread_name(self, cpu_list_name, pid_cur, cpu_ev_list):
-            stat = trace_event_thread_stat(cpu_list_name, pid_cur)
+            item = self.db.post_opts.alloc_first_item()
+            stat = trace_event_thread_stat(item, cpu_list_name, pid_cur)
             cpu_pid_list = {STAT_KEY: stat}
             cpu_pid_max = pid_cur
             for cpu_id in cpu_ev_list.keys():
                 cpu_pid = pid_cur + int(cpu_id)
                 cpu_pid_max = max(cpu_pid_max, cpu_pid)
                 cpu_name = cpu_list_name+'_'+str(cpu_id)
-                stat = trace_event_thread_stat(cpu_name, cpu_pid)
+                item = self.db.post_opts.alloc_first_item()
+                stat = trace_event_thread_stat(item, cpu_name, cpu_pid)
                 cpu_pid_list[cpu_pid] = stat
             self.db.thread_list[pid_cur] = cpu_pid_list
             return cpu_pid_max
@@ -694,7 +712,7 @@ class trace_event_database:
             pid_cur = self.irq_to_thread_name(LANGRAH_METADATA_IRQ,
                                               'irq_handler_entry',
                                               pid_cur, self.db.irq_list) + 1
-            self.db.vec_tid = pid_cur
+            self.db.softirq_tid = pid_cur
             pid_cur = self.irq_to_thread_name(LANGRAH_METADATA_SOFTIRQ,
                                               'softirq_entry',
                                               pid_cur, self.db.vec_list)
@@ -740,12 +758,14 @@ class trace_event_database:
         def insert_thread_list(self):
             for tid in self.db.tid_list.keys():
                 tid_ev = self.db.tid_list[tid][-1]
-                stat = trace_event_thread_stat(tid_ev.name, tid_ev.tid)
+                item = self.db.post_opts.alloc_first_item()
+                stat = trace_event_thread_stat(item, tid_ev.name, tid_ev.tid)
                 self.db.insert_dict_dict(
                     stat, tid, tid_ev.pid, self.db.thread_list)
                 pid_list = self.db.thread_list[tid_ev.pid]
                 if STAT_KEY not in pid_list:
-                    stat_pid = trace_event_thread_stat("", tid_ev.pid)
+                    item = self.db.post_opts.alloc_first_item()
+                    stat_pid = trace_event_thread_stat(item, "", tid_ev.pid)
                     self.db.thread_list[tid_ev.pid][STAT_KEY] = stat_pid
                 if tid_ev.pid == tid_ev.tid:
                     stat_pid = self.db.thread_list[tid_ev.pid][STAT_KEY]
@@ -764,6 +784,17 @@ class trace_event_database:
             self.db.timestamp_end = self.db.trace_list[-1].timestamp
             self.parse_delay()
             self.init_metadata_event()
+
+        def impl_cpu_thread(self):
+            for ev in self.db.trace_list:
+                handle = self.db.get_handle(ev)
+                handle.cpu_thread_opt(ev)
+
+        def impl_timeline_thread(self):
+            for ev_list in self.db.cpu_list:
+                for ev in ev_list:
+                    handle = self.db.get_handle(ev)
+                    handle.timeline_opt(ev)
 
         def __init__(self, database):
             self.db = database
@@ -784,6 +815,14 @@ class trace_event_database:
                 stack_addr_list.append(key_word[1])
             else:
                 print("Error stack "+line)
+
+        def ftrace_stack_pre_init(self, ev):
+            ev.priv = [[], []]
+            if ev.event_name == "<stack":
+                ev.is_stack = TRACE_STACK_KERNEL
+            else:
+                ev.is_stack = TRACE_STACK_USER
+            return
 
         def perf_insert_stack(self, line, priv):
             [[stack_name_list, stack_addr_list],
@@ -807,19 +846,14 @@ class trace_event_database:
             else:
                 print("Error stack "+line)
 
-        def null_pre_init(self, ev):
-            return
-
         def perf_pre_init(self, ev):
             ev.priv = [ev.kernel_stack, ev.user_stack]
             return
 
-        def ftrace_stack_pre_init(self, ev):
-            ev.priv = [[], []]
-            if ev.event_name == "<stack":
-                ev.is_stack = TRACE_STACK_KERNEL
-            else:
-                ev.is_stack = TRACE_STACK_USER
+        def sched_switch_timeline(self, ev):
+            return
+
+        def sched_waking_timeline_rel(self, ev):
             return
 
         def irq_pre_init(self, ev):
@@ -833,6 +867,12 @@ class trace_event_database:
             irq_ev_list.append(ev)
             return
 
+        def irq_entry_timeline(self, ev):
+            return
+
+        def irq_exit_timeline(self, ev):
+            return
+
         def softirq_pre_init(self, ev):
             vec_info = ev.priv
             vec_num = vec_info[0]
@@ -844,10 +884,29 @@ class trace_event_database:
             vec_ev_list.append(ev)
             return
 
+        def softirq_entry_timeline(self, ev):
+            return
+
+        def softirq_exit_timeline(self, ev):
+            return
+
+        def softirq_timeline_rel(self, ev):
+            return
+
+        def null_pre_init(self, ev):
+            return
+
         def null_insert_stack(self, line, priv):
             return
 
         def null_timeline(self, ev):
+            item = self.db.post_opts.alloc_item(ev)
+            thread_stat = self.db.get_thread(ev)
+            item.name = thread_stat.name
+            thread_stat.insert_item(item)
+            return
+
+        def null_timeline_rel(self, ev):
             item = self.db.post_opts.alloc_item(ev)
             thread_stat = self.db.get_thread(ev)
             item.name = thread_stat.name
@@ -864,11 +923,13 @@ class trace_event_database:
         def __init__(self, database, mod_name='', pre_init_opt=null_pre_init,
                      insert_stack_opt=null_insert_stack,
                      timeline_opt=null_timeline,
+                     timeline_rel_opt=null_timeline_rel,
                      cpu_thread_opt=null_cpu_thread):
             self.mod_name = mod_name
             self.pre_init_opt = pre_init_opt
             self.insert_stack_opt = insert_stack_opt
             self.timeline_opt = timeline_opt
+            self.timeline_rel_opt = timeline_rel_opt
             self.cpu_thread_opt = cpu_thread_opt
             self.db = database
 
@@ -908,14 +969,13 @@ class trace_event_database:
         self.stack_list = {}
         self.stack_kernel_list = {}
         self.stack_user_list = {}
-        self.user_symbol_list = {}
         self.timestamp_start = -1.0
         self.timestamp_end = -1.0
         self.irq_tid = int(0)
-        self.vec_tid = int(0)
+        self.softirq_tid = int(0)
         self.cpu_tid = int(0)
 
-    def init_event_type(self):
+    def init_event_type_handle(self):
         self.event_type = {
             "sched_kthread_stop": self.event_opt(self, "sched"),
             "sched_kthread_stop_ret": self.event_opt(self, "sched"),
@@ -938,22 +998,37 @@ class trace_event_database:
             "sched_stat_wait": self.event_opt(self, "sched"),
             "sched_stick_numa": self.event_opt(self, "sched"),
             "sched_swap_numa": self.event_opt(self, "sched"),
-            "sched_switch": self.event_opt(self, "sched"),
+            "sched_switch": self.event_opt(
+                self, "sched",
+                timeline_opt=self.event_opts.sched_switch_timeline,),
             "sched_wait_task": self.event_opt(self, "sched"),
             "sched_wake_idle_without_ipi": self.event_opt(self, "sched"),
             "sched_wakeup": self.event_opt(self, "sched"),
             "sched_wakeup_new": self.event_opt(self, "sched"),
-            "sched_waking": self.event_opt(self, "sched"),
-            "irq_handler_entry": self.event_opt(self, "irq",
-                                                self.event_opt.irq_pre_init),
-            "irq_handler_exit": self.event_opt(self, "irq",
-                                               self.event_opt.irq_pre_init),
-            "softirq_entry": self.event_opt(self, "irq",
-                                            self.event_opt.softirq_pre_init),
-            "softirq_exit": self.event_opt(self, "irq",
-                                           self.event_opt.softirq_pre_init),
-            "softirq_raise": self.event_opt(self, "irq",
-                                            self.event_opt.softirq_pre_init),
+            "sched_waking": self.event_opt(
+                self, "sched",
+                timeline_rel_opt=self.event_opts.sched_waking_timeline_rel,),
+            "irq_handler_entry": self.event_opt(
+                self,
+                "irq",
+                self.event_opt.irq_pre_init,
+                timeline_opt=self.event_opts.irq_entry_timeline,),
+            "irq_handler_exit": self.event_opt(
+                self, "irq",
+                self.event_opt.irq_pre_init,
+                timeline_opt=self.event_opts.irq_exit_timeline,),
+            "softirq_entry": self.event_opt(
+                self, "irq",
+                self.event_opt.softirq_pre_init,
+                timeline_opt=self.event_opts.softirq_entry_timeline,),
+            "softirq_exit": self.event_opt(
+                self, "irq",
+                self.event_opt.softirq_pre_init,
+                timeline_opt=self.event_opts.softirq_exit_timeline,),
+            "softirq_raise": self.event_opt(
+                self, "irq",
+                self.event_opt.softirq_pre_init,
+                timeline_rel_opt=self.event_opts.softirq_timeline_rel),
             "<stack": self.event_opt(self, "ftrace",
                                      self.event_opt.ftrace_stack_pre_init,
                                      self.event_opt.ftrace_insert_stack),
@@ -1004,7 +1079,7 @@ class trace_event_database:
         self.post_opts = self.post_processing(self, LANGRAH_OUTPUT_FORMAT_CTF)
         self.anly = self.analysis(self)
         self.alloc_resource()
-        self.init_event_type()
+        self.init_event_type_handle()
 
 
 class debug:
@@ -1145,6 +1220,8 @@ if __name__ == '__main__':
         data, format_type=LANGRAH_INPUT_FORMAT_PERF_SCRIPT)
     debug_opts.print_time()
     db.anly.init_global()
+    debug_opts.print_time()
+    db.anly.impl_cpu_thread()
     debug_opts.print_time()
     # event_stack_stat(trace_list)
     # print_all_te(trace_list)
