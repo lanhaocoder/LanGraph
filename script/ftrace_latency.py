@@ -537,24 +537,6 @@ class trace_event_database:
                 opt = self.db.event_type[te.event_name]
                 opt.pre_init_opt(self, te)
 
-        def insert_dict_list(self, te, key, ev_dict_list):
-            if key not in ev_dict_list:
-                ev_list = []
-                ev_dict_list[key] = ev_list
-            else:
-                ev_list = ev_dict_list[key]
-            ev_list.append(te)
-
-        def insert_tid_pid_list(self, te):
-            if te.pid not in self.db.pid_tid_list:
-                pid_ev_list = dict()
-                self.db.pid_tid_list[te.pid] = pid_ev_list
-                pid_ev_list["name"] = ""
-            else:
-                pid_ev_list = self.db.pid_tid_list[te.pid]
-            if te.pid == te.tid:
-                pid_ev_list["name"] = te.name
-
         def init_stack(self, te):
             if te.cpu not in self.db.cpu_list:
                 return
@@ -570,9 +552,9 @@ class trace_event_database:
             return
 
         def init_normal(self, te):
-            self.insert_dict_list(te, te.cpu, self.db.cpu_list)
-            self.insert_dict_list(te, te.tid, self.db.tid_list)
-            self.insert_dict_list(te, te.event_name, self.db.event_mod_list)
+            self.db.insert_dict_list(te, te.cpu, self.db.cpu_list)
+            self.db.insert_dict_list(te, te.tid, self.db.tid_list)
+            self.db.insert_dict_list(te, te.event_name, self.db.event_mod_list)
             self.db.trace_list.append(te)
             return
 
@@ -607,7 +589,6 @@ class trace_event_database:
                 last_te = te
                 self.pre_init(te, line)
                 self.init_common(te)
-                self.db.te_list.append(te)
 
         def parse_perf_json(self, input_filename=INPUT_PERF_JSON):
             fd = open(input_filename)
@@ -618,7 +599,6 @@ class trace_event_database:
                 if te.get_available() == TRACE_RETURN_FALSE:
                     print("TRACE_RETURN_FALSE")
                     continue
-                self.db.te_list.append(te)
                 self.pre_init(te, json_te)
                 self.init_normal(te)
             fd.close()
@@ -638,7 +618,7 @@ class trace_event_database:
                 for tid in tid_id_list:
                     pid_name = tid_id_list[tid]
                     item = self.output.alloc_item()
-                    if tid != "name":
+                    if tid != "stat":
                         item.format_tidname_metadata(pid_name, pid, tid)
                     else:
                         item.format_pidname_metadata(pid_name, pid, pid)
@@ -677,14 +657,7 @@ class trace_event_database:
             return cpu_pid_max
 
         def get_max_tid(self):
-            pid_name_list = list()
-            for pid in self.db.pid_tid_list:
-                tid_id_list = self.db.pid_tid_list[pid]
-                for tid in tid_id_list:
-                    if tid == "name":
-                        continue
-                    pid_name_list.append(tid)
-            return max(pid_name_list)
+            return max(self.db.tid_list.keys())
 
         def init_metadata_event(self):
             pid_cur = self.get_max_tid() + 1
@@ -707,25 +680,9 @@ class trace_event_database:
                 te.stack_hash = hash(
                     str([te.kernel_stack[0], te.user_stack[0]]))
 
-        def init_pid_event(self):
-            for pid in self.db.pid_tid_list:
-                tid_id_list = self.db.pid_tid_list[pid]
-                pid_event_list = []
-                for tid in tid_id_list:
-                    if tid == "name":
-                        continue
-                    pid_event_list.extend(self.db.tid_list[tid])
-                pid_event_list.sort(key=lambda x: x.timestamp)
-                self.db.pid_list[pid] = pid_event_list
-
-        def init_stack_hash(self):
+        def insert_stack_list(self):
             for te in self.db.trace_list:
-                hash_id = te.stack_hash
-                if hash_id in self.db.stack_hash_list:
-                    hash_num = self.db.stack_hash_list[hash_id]
-                    self.db.stack_hash_list[hash_id] = hash_num + 1
-                else:
-                    self.db.stack_hash_list[hash_id] = 1
+                self.db.insert_dict_list(te, te.stack_hash, self.db.stack_list)
 
         def parse_delay_list(self, delay_list, delay_offset):
             for ev in delay_list.values():
@@ -743,55 +700,51 @@ class trace_event_database:
             self.parse_delay_list(self.db.vec_list, DELAY_SOFTIRQ)
             self.parse_delay_list(self.db.irq_list, DELAY_IRQ)
 
-        def init_list(self, ls):
+        def dict_sort_by_timestamp(self, ls):
             if type(ls) != dict:
                 return
             for evlist in ls.values():
                 if type(evlist) == list:
                     evlist.sort(key=lambda x: x.timestamp)
 
+        def insert_tid_pid_list(self):
+            for tid in self.db.tid_list.keys():
+                tid_ev = self.db.tid_list[tid][0]
+                pid = tid_ev.pid
+                self.db.insert_dict_list(tid, pid, self.db.pid_tid_list)
+
         def init_global(self):
             self.db.trace_list.sort(key=lambda x: x.timestamp)
-            self.init_list(self.db.cpu_list)
-            self.init_list(self.db.irq_list)
-            self.init_list(self.db.tid_list)
-            self.init_list(self.db.vec_list)
+            self.insert_tid_pid_list()
+            self.dict_sort_by_timestamp(self.db.cpu_list)
+            self.dict_sort_by_timestamp(self.db.irq_list)
+            self.dict_sort_by_timestamp(self.db.tid_list)
+            self.dict_sort_by_timestamp(self.db.vec_list)
             self.init_trace_stack()
-            self.init_stack_hash()
+            self.insert_stack_list()
             self.db.timestamp_start = self.db.trace_list[0].timestamp
             self.db.timestamp_end = self.db.trace_list[-1].timestamp
             self.parse_delay()
             self.init_metadata_event()
 
-        def event_type_priv_max(self, event="<user stack trace>"):
-            if event not in self.db.event_type:
-                print("Event %s not in event_type." % event)
-                return
-            opt = self.db.event_type[event]
-            max_size = 0
-            for ev in opt.event_type_list:
-                if max_size < len(ev.priv):
-                    max_size = len(ev.priv)
-            print("%s max_size is %d." % (event, max_size))
-
-        def event_type_print_priv(self):
-            for name in self.db.event_type:
-                opt = self.db.event_type[name]
-                if len(opt.event_type_list) != 0:
-                    print(name, opt.event_type_list[0].priv)
-                else:
-                    print(name)
-
-        def print_all_te(self, trace_list):
-            for te in trace_list:
-                print('%d\t%08X %s %s|%s' % (
-                    self.db.stack_hash_list[te.stack_hash], abs(
-                        te.stack_hash), te.raw.strip(),
-                    te.kernel_stack.priv[0],
-                    te.user_stack.priv[0]))
-
         def __init__(self, database):
             self.db = database
+
+    def insert_dict_list(self, value, key, ev_dict_list):
+        if key in ev_dict_list:
+            ev_list = ev_dict_list[key]
+        else:
+            ev_list = []
+            ev_dict_list[key] = ev_list
+        ev_list.append(value)
+
+    def count_dict_list(self, key, ev_dict_list):
+        if key in ev_dict_list:
+            count = ev_dict_list[key]
+            count = count + 1
+            ev_dict_list[key] = count
+        else:
+            ev_dict_list[key] = 1
 
     def alloc_resource(self):
         self.cpu_list = {}
@@ -802,8 +755,7 @@ class trace_event_database:
         self.pid_list = {}
         self.event_mod_list = {}
         self.pid_tid_list = {}
-        self.te_list = []
-        self.stack_hash_list = {}
+        self.stack_list = {}
         self.user_symbol_list = {}
         self.timestamp_start = -1.0
         self.timestamp_end = -1.0
@@ -887,6 +839,17 @@ class debug:
                     te_list[i].event_name != "<user stack trace>":
                 print(te_list[i].timestamp)
 
+    def init_pid_event(self):
+        for pid in self.db.pid_tid_list:
+            tid_id_list = self.db.pid_tid_list[pid]
+            pid_event_list = []
+            for tid in tid_id_list:
+                if tid == "stat":
+                    continue
+                pid_event_list.extend(self.db.tid_list[tid])
+            pid_event_list.sort(key=lambda x: x.timestamp)
+            self.db.pid_list[pid] = pid_event_list
+
     def event_stack_stat(self, te_list):
         te_len = len(te_list)
         stack_stat_list = {}
@@ -918,6 +881,33 @@ class debug:
             if len(te.user_stack[0]) > 0:
                 te.user_stack[0].reverse()
 
+    def event_type_priv_max(self, event="<user stack trace>"):
+        if event not in self.db.event_type:
+            print("Event %s not in event_type." % event)
+            return
+        opt = self.db.event_type[event]
+        max_size = 0
+        for ev in opt.event_type_list:
+            if max_size < len(ev.priv):
+                max_size = len(ev.priv)
+        print("%s max_size is %d." % (event, max_size))
+
+    def event_type_print_priv(self):
+        for name in self.db.event_type:
+            opt = self.db.event_type[name]
+            if len(opt.event_type_list) != 0:
+                print(name, opt.event_type_list[0].priv)
+            else:
+                print(name)
+
+    def print_all_te(self, trace_list):
+        for te in trace_list:
+            print('%d\t%08X %s %s|%s' % (
+                self.db.stack_count_list[te.stack_hash], abs(
+                    te.stack_hash), te.raw.strip(),
+                te.kernel_stack.priv[0],
+                te.user_stack.priv[0]))
+
     def print_all_cpu_te(self, cpu_list):
         for i in range(4):
             trace_list = cpu_list[i]
@@ -928,9 +918,13 @@ class debug:
         for i in range(len(stat_t) - 1):
             print(stat_t[i + 1]-stat_t[i])
 
-    def print_time(self, stat_t):
-        stat_t.append(time.perf_counter())
-        print(stat_t[len(stat_t) - 1]-stat_t[-2])
+    def print_time(self):
+        self.stat_t.append(time.perf_counter())
+        print(self.stat_t[len(self.stat_t) - 1]-self.stat_t[-2])
+
+    def __init__(self, database):
+        self.db = database
+        self.stat_t = [time.perf_counter()]
 
 
 class event_to_perf:
@@ -963,20 +957,19 @@ class event_to_perf:
 if __name__ == '__main__':
     db = trace_event_database()
     file_opts = file_opt()
-    debug_opts = debug()
-    stat_t = [time.perf_counter()]
+    debug_opts = debug(db)
     data = file_opts.read_input(INPUT_FTRACE_FILE)
-    debug_opts.print_time(stat_t)
+    debug_opts.print_time()
     db.pre_opts.parse_data(
         data, format_type=LANGRAH_INPUT_FORMAT_FTRACE)
-    debug_opts.print_time(stat_t)
+    debug_opts.print_time()
     data = file_opts.read_input(INPUT_PERF_SCRIPT)
-    debug_opts.print_time(stat_t)
+    debug_opts.print_time()
     db.pre_opts.parse_data(
         data, format_type=LANGRAH_INPUT_FORMAT_PERF_SCRIPT)
-    debug_opts.print_time(stat_t)
+    debug_opts.print_time()
     db.anly.init_global()
-    debug_opts.print_time(stat_t)
+    debug_opts.print_time()
     # event_stack_stat(trace_list)
     # print_all_te(trace_list)
     # print_all_te_irq(trace_list)
