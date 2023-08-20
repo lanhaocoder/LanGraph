@@ -915,7 +915,7 @@ class trace_event_database:
         def impl_timeline_thread(self):
             self.db.data.bind_id = 0
             for ev in self.db.data.trace_list:
-                print(ev.raw)
+                #print(ev.raw)
                 handle = self.db.get_handle(ev)
                 handle.timeline_opt(self.db.event_opts, ev, handle.sched_attrs)
 
