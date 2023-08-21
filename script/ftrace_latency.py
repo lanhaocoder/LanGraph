@@ -136,7 +136,7 @@ SCHED_IRQ = 15
 SCHED_ANY = 16
 
 sched_stat = {
-    "R":  SCHED_RUNNING,
+    "R":  SCHED_RUNPRE,
     "R+": SCHED_RUNPRE,
     "S":  SCHED_SLEEP,
     "D":  SCHED_UINTER,
@@ -529,23 +529,25 @@ class trace_event_output_tef:
 
     def format_pidname_metadata(self, instant, name, pid, tid, args=dict()):
         instant.name = "process_name"
-        instant.args['name'] = name
+        args['name'] = name
         instant.pid = pid
         instant.tid = tid
         instant.ts = int(0)
         instant.cat = '__metadata'
         instant.ph = "M"
         instant.args = args
+        instant.dur = 0
 
     def format_tidname_metadata(self, instant, name, pid, tid, args=dict()):
         instant.name = "thread_name"
-        instant.args['name'] = name
+        args['name'] = name
         instant.pid = pid
         instant.tid = tid
         instant.ts = int(0)
         instant.cat = '__metadata'
         instant.ph = "M"
         instant.args = args
+        instant.dur = 0
 
     def get_trace_event_format(self):
         return self.json_tree
@@ -570,7 +572,10 @@ class trace_event_output_tef:
         json_item['pid'] = item.pid
         json_item['tid'] = item.tid
         json_item['ts'] = item.ts
-        json_item['dur'] = item.dur
+        if item.dur != -1:
+            json_item['dur'] = item.dur
+        else:
+            json_item['dur'] = 0
         json_item['ts'] = item.ts
         json_item['ph'] = item.ph
         if item.bind_id != '':
@@ -716,6 +721,41 @@ class trace_event_database:
                         self.output.format_pidname_metadata(
                             item, timeline.name, pid, pid)
                     self.output.insert_item(item)
+
+        def setup_bind(self, item):
+            if item.flow_in != -1:
+                item.bind_id = str(item.flow_in)
+                item.flow_in = bool(True)
+            if item.flow_out != -1:
+                item.bind_id = str(item.flow_out)
+                item.flow_out = bool(True)
+
+        def format_timeline_event(self, ev_list, pid, tid):
+            for ev_item in ev_list:
+                ev_item.tid = tid
+                ev_item.pid = pid
+                ev_item.ph = 'I'
+                self.setup_bind(ev_item)
+                self.output.insert_item(ev_item)
+
+        def format_timeline(self, timeline, pid, tid):
+            if tid != TIMELINE_KEY:
+                for tl_item in timeline.tl_list:
+                    tl_item.tid = tid
+                    tl_item.pid = pid
+                    tl_item.ph = 'X'
+                    tl_item.args = {}
+                    #self.setup_bind(tl_item)
+                    self.output.insert_item(tl_item)
+                    #self.format_timeline_event(timeline.ev_list, pid, tid)
+
+        def format_thread_timeline(self):
+            for pid in self.db.data.thread_list:
+                tid_id_list = self.db.data.thread_list[pid]
+                for tid in tid_id_list:
+                    timeline = tid_id_list[tid]
+                    if tid != TIMELINE_KEY:
+                        self.format_timeline(timeline, pid, tid)
 
         def alloc_item(self, ev):
             item = self.output.alloc_item(ev)
@@ -1385,7 +1425,7 @@ class event_to_perf:
 
 
 def exchange_data(db):
-    data=db.get_data()
+    data = db.get_data()
     db = trace_event_database()
     db.post_opts.output_format(LANGRAH_OUTPUT_FORMAT_TEF)
     db.set_data(data)
@@ -1409,8 +1449,10 @@ def read_data():
     debug_opts.print_time()
     db.anly.init_global()
     debug_opts.print_time()
+    db.anly.impl_timeline_thread()
+    debug_opts.print_time()
     return db
 
 
 if __name__ == '__main__':
-    db = exchange_data(db)
+    print("hello ketty")
