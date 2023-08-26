@@ -9,6 +9,7 @@ import re
 import pickle
 import json
 import time
+import copy
 
 INPUT_FTRACE_FILE = "langraph/ftrace.log"
 INPUT_FTRACE_SYMBOL_FILE = "langraph/ftrace_symbol.log"
@@ -117,26 +118,28 @@ sched status
 | P          | Parked                 |
 | N          | No Load                |
 """
+
 SCHED_RUNNING = 0
-SCHED_RUNPRE = 1
-SCHED_SLEEP = 2
-SCHED_UINTER = 3
-SCHED_STOP = 4
-SCHED_TRACE = 5
-SCHED_DEAD = 6
-SCHED_ZOMBIE = 7
-SCHED_TASK_DEAD = 8
-SCHED_IDLE = 9
-SCHED_WAKE_KILL = 10
-SCHED_WAKING = 11
-SCHED_PARKED = 12
-SCHED_NO_LOAD = 13
-SCHED_SOFTIRQ = 14
-SCHED_IRQ = 15
-SCHED_ANY = 16
+SCHED_RUNABLE = 1
+SCHED_RUNPRE = 2
+SCHED_SLEEP = 3
+SCHED_UINTER = 4
+SCHED_STOP = 5
+SCHED_TRACE = 6
+SCHED_DEAD = 7
+SCHED_ZOMBIE = 8
+SCHED_TASK_DEAD = 9
+SCHED_IDLE = 10
+SCHED_WAKE_KILL = 11
+SCHED_WAKING = 12
+SCHED_PARKED = 13
+SCHED_NO_LOAD = 14
+SCHED_SOFTIRQ = 15
+SCHED_IRQ = 16
+SCHED_ANY = 17
 
 sched_stat = {
-    "R":  SCHED_RUNPRE,
+    "R":  SCHED_RUNABLE,
     "R+": SCHED_RUNPRE,
     "S":  SCHED_SLEEP,
     "D":  SCHED_UINTER,
@@ -153,6 +156,26 @@ sched_stat = {
     "A": SCHED_ANY,
 }
 
+sched_format = {
+    SCHED_RUNNING:   "Running",
+    SCHED_RUNABLE:   "Runnable",
+    SCHED_RUNPRE:    "Runnable (Preempted)",
+    SCHED_SLEEP:     "Sleeping",
+    SCHED_UINTER:    "Uninterruptible Sleep",
+    SCHED_STOP:      "Stopped",
+    SCHED_TRACE:     "Traced",
+    SCHED_DEAD:      "Exit (Dead)",
+    SCHED_ZOMBIE:    "Exit (Zombie)",
+    SCHED_TASK_DEAD: "Task Dead",
+    SCHED_IDLE:      "Idle",
+    SCHED_WAKE_KILL: "Wake Kill",
+    SCHED_WAKING:    "Waking",
+    SCHED_PARKED:    "Parked",
+    SCHED_NO_LOAD:   "No Load",
+    SCHED_ANY:       "Any",
+    SCHED_SOFTIRQ:   "Softirq",
+    SCHED_IRQ:       "Irq",
+}
 EVENT_CAT_TOP = "toplevel"
 EVENT_CAT_EVENT = "ipc"
 EVENT_CAT_STACK = "cc"
@@ -458,8 +481,8 @@ class trace_event_output_item:
         self.ev_list.append(item)
         return
 
-    def set_duration(self, dur):
-        self.dur = dur - self.dur
+    def set_duration(self, ts):
+        self.dur = ts - self.ts
 
 
 class trace_event_timeline:
@@ -559,7 +582,7 @@ class trace_event_output_tef:
 
     def save_trace_event_format(self, output=OUTPUT_FILE):
         fd = open(output, 'w+')
-        fd.write(json.dumps(self.json_tree_result, indent=0))
+        fd.write(json.dumps(self.json_tree, indent=0))
 
     def __init__(self):
         self.clean_trace_event_format()
@@ -567,7 +590,7 @@ class trace_event_output_tef:
     def insert_item(self, item):
         json_item = dict()
         json_item['name'] = item.name
-        json_item['args'] = item.args
+        json_item['args'] = copy.copy(item.args)
         json_item['cat'] = item.cat
         json_item['pid'] = item.pid
         json_item['tid'] = item.tid
@@ -582,7 +605,8 @@ class trace_event_output_tef:
             json_item['bind_id'] = item.bind_id
             json_item['flow_in'] = item.flow_in
             json_item['flow_out'] = item.flow_out
-        self.json_tree['traceEvents'].append(json_item)
+        te_list = self.json_tree['traceEvents']
+        te_list.append(json_item)
 
     def alloc_item(self, ev):
         return self.trace_event_output_item_tef(ev)
@@ -709,9 +733,9 @@ class trace_event_database:
                 self.output = trace_event_output_tef()
 
         def format_thread_name_metadata(self):
-            for pid in self.db.data.thread_list:
+            for pid in self.db.data.thread_list.keys():
                 tid_id_list = self.db.data.thread_list[pid]
-                for tid in tid_id_list:
+                for tid in tid_id_list.keys():
                     timeline = tid_id_list[tid]
                     item = self.output.alloc_item('')
                     if tid != TIMELINE_KEY:
@@ -744,15 +768,29 @@ class trace_event_database:
                     tl_item.tid = tid
                     tl_item.pid = pid
                     tl_item.ph = 'X'
-                    tl_item.args = {}
-                    #self.setup_bind(tl_item)
+                    if type(tl_item.args) != dict():
+                        args = dict()
+                        args[0] = tl_item.ts
+                        args[1] = tl_item.ev.event_name
+                        args[2] = tl_item.ev.cpu
+                        i = 3
+                        for arg in tl_item.args:
+                            args[i] = arg
+                            i = i + 1
+                        tl_item.args = args
+                    if 0:
+                        tl_item.name = str(tl_item.name + " " +
+                                           sched_format[tl_item.sched_status])
+                    else:
+                        tl_item.name = str(sched_format[tl_item.sched_status])
+                    # self.setup_bind(tl_item)
                     self.output.insert_item(tl_item)
                     #self.format_timeline_event(timeline.ev_list, pid, tid)
 
         def format_thread_timeline(self):
-            for pid in self.db.data.thread_list:
+            for pid in self.db.data.thread_list.keys():
                 tid_id_list = self.db.data.thread_list[pid]
-                for tid in tid_id_list:
+                for tid in tid_id_list.keys():
                     timeline = tid_id_list[tid]
                     if tid != TIMELINE_KEY:
                         self.format_timeline(timeline, pid, tid)
@@ -785,9 +823,9 @@ class trace_event_database:
             item.cat = EVENT_CAT_TOP
             item.sched_status = next_state
             last_item = tl.get_last_timeline_item()
-            last_item.set_duration(item.dur)
+            last_item.set_duration(item.ts)
             if (prev_state != SCHED_ANY):
-                item.sched_status = prev_state
+                last_item.sched_status = prev_state
             tl.insert_item(item)
 
         def timeline_add_event(self, ev, tid):
@@ -955,7 +993,7 @@ class trace_event_database:
         def impl_timeline_thread(self):
             self.db.data.bind_id = 0
             for ev in self.db.data.trace_list:
-                #print(ev.raw)
+                # print(ev.raw)
                 handle = self.db.get_handle(ev)
                 handle.timeline_opt(self.db.event_opts, ev, handle.sched_attrs)
 
@@ -1072,7 +1110,7 @@ class trace_event_database:
         def softirq_raise_timeline(self, ev, sched_attrs):
             tid = self.db.get_softirq_tid(int(ev.priv[FTRACE_SOFTIRQ_INDEX]))
             self.db.post_opts.timeline_add_phase(
-                ev, tid, SCHED_ANY, SCHED_RUNPRE)
+                ev, tid, SCHED_ANY, SCHED_RUNABLE)
             self.db.post_opts.timeline_set_bind(
                 ev.tid, tid, self.db.get_bind_id())
             return
@@ -1164,7 +1202,7 @@ class trace_event_database:
             "sched_kthread_work_execute_start": self.event_opt(
                 self, "sched",
                 sched_attrs=sched_attr(
-                    SCHED_NO_LOAD, SCHED_RUNPRE, EVENT_CAT_TOP, -1),),
+                    SCHED_NO_LOAD, SCHED_RUNABLE, EVENT_CAT_TOP, -1),),
             "sched_kthread_work_queue_work": self.event_opt(self, "sched"),
             "sched_migrate_task": self.event_opt(self, "sched"),
             "sched_move_numa": self.event_opt(self, "sched"),
@@ -1177,7 +1215,7 @@ class trace_event_database:
             "sched_process_fork": self.event_opt(
                 self, "sched",
                 sched_attrs=sched_attr(
-                    SCHED_NO_LOAD, SCHED_RUNPRE, EVENT_CAT_TOP, -1),),
+                    SCHED_NO_LOAD, SCHED_RUNABLE, EVENT_CAT_TOP, -1),),
             "sched_process_free": self.event_opt(
                 self, "sched",
                 sched_attrs=sched_attr(
@@ -1201,7 +1239,7 @@ class trace_event_database:
             "sched_waking": self.event_opt(
                 self, "sched",
                 sched_attrs=sched_attr(
-                    SCHED_ANY, SCHED_RUNPRE, EVENT_CAT_EVENT,
+                    SCHED_ANY, SCHED_RUNABLE, EVENT_CAT_EVENT,
                     FTRACE_SCHED_WAKING_TID_INDEX),),
             "irq_handler_entry": self.event_opt(
                 self,
