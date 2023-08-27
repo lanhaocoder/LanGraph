@@ -95,6 +95,8 @@ FTRACE_SCHED_SWITCH_PREV_STAT_INDEX = 3
 FTRACE_SCHED_SWITCH_NEXT_TID_INDEX = 5
 FTRACE_SCHED_SWITCH_NEXT_STAT_INDEX = 6
 FTRACE_SCHED_WAKING_TID_INDEX = 1
+FTRACE_SCHED_FORK_TID_INDEX = 3
+FTRACE_SCHED_FREE_TID_INDEX = 1
 FTRACE_SOFTIRQ_INDEX = 0
 FTRACE_IRQ_INDEX = 0
 
@@ -768,16 +770,6 @@ class trace_event_database:
                     tl_item.tid = tid
                     tl_item.pid = pid
                     tl_item.ph = 'X'
-                    if type(tl_item.args) != dict():
-                        args = dict()
-                        args[0] = tl_item.ts
-                        args[1] = tl_item.ev.event_name
-                        args[2] = tl_item.ev.cpu
-                        i = 3
-                        for arg in tl_item.args:
-                            args[i] = arg
-                            i = i + 1
-                        tl_item.args = args
                     if 0:
                         tl_item.name = str(tl_item.name + " " +
                                            sched_format[tl_item.sched_status])
@@ -798,7 +790,15 @@ class trace_event_database:
         def alloc_item(self, ev):
             item = self.output.alloc_item(ev)
             item.name = ev.name
-            item.args = ev.priv
+            args = dict()
+            args[0] = ev.timestamp
+            args[1] = ev.event_name
+            args[2] = ev.cpu
+            i = 3
+            for arg in ev.priv:
+                args[i] = arg
+                i = i + 1
+            item.args = args
             item.pid = ev.pid
             item.tid = ev.tid
             item.ts = ev.timestamp
@@ -1198,11 +1198,12 @@ class trace_event_database:
             "sched_kthread_work_execute_end": self.event_opt(
                 self, "sched",
                 sched_attrs=sched_attr(
-                    SCHED_ANY, SCHED_DEAD, EVENT_CAT_TOP, -1),),
+                    SCHED_ANY, SCHED_IDLE, EVENT_CAT_TOP, -1),),
             "sched_kthread_work_execute_start": self.event_opt(
                 self, "sched",
                 sched_attrs=sched_attr(
-                    SCHED_NO_LOAD, SCHED_RUNABLE, EVENT_CAT_TOP, -1),),
+                    SCHED_NO_LOAD, SCHED_RUNABLE, EVENT_CAT_EVENT,
+                    -1),),
             "sched_kthread_work_queue_work": self.event_opt(self, "sched"),
             "sched_migrate_task": self.event_opt(self, "sched"),
             "sched_move_numa": self.event_opt(self, "sched"),
@@ -1215,11 +1216,13 @@ class trace_event_database:
             "sched_process_fork": self.event_opt(
                 self, "sched",
                 sched_attrs=sched_attr(
-                    SCHED_NO_LOAD, SCHED_RUNABLE, EVENT_CAT_TOP, -1),),
+                    SCHED_NO_LOAD, SCHED_RUNABLE, EVENT_CAT_EVENT,
+                    FTRACE_SCHED_FORK_TID_INDEX),),
             "sched_process_free": self.event_opt(
                 self, "sched",
                 sched_attrs=sched_attr(
-                    SCHED_DEAD, SCHED_NO_LOAD, EVENT_CAT_TOP, -1),),
+                    SCHED_ANY, SCHED_NO_LOAD, EVENT_CAT_EVENT,
+                    FTRACE_SCHED_FREE_TID_INDEX),),
             "sched_process_hang": self.event_opt(self, "sched"),
             "sched_process_wait": self.event_opt(self, "sched"),
             "sched_stat_blocked": self.event_opt(self, "sched"),
