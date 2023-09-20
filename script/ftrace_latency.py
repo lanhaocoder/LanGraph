@@ -1076,13 +1076,46 @@ class trace_event_database:
             return
 
         def irq_entry_timeline(self, ev, sched_attrs):
+            tid = self.db.get_irq_tid(int(ev.priv[FTRACE_IRQ_INDEX]))
+            self.db.post_opts.timeline_add_phase(
+                ev, tid, SCHED_ANY, SCHED_RUNNING)
             self.db.post_opts.timeline_add_phase(
                 ev, ev.tid, SCHED_ANY, SCHED_IRQ)
+            ev.tid = tid
             return
 
         def irq_exit_timeline(self, ev, sched_attrs):
+            irq_tid = self.db.get_irq_tid(int(ev.priv[FTRACE_IRQ_INDEX]))
+            irq_tl = self.db.get_thread_tid(irq_tid)
+            tl = self.db.get_thread_tid(ev.tid)
+            irq_item = irq_tl.tl_list[-1]
+            tl_list = tl.tl_list
+            irq_index = 0
+            for i in range(len(tl_list) - 1, -1, -1):
+                if tl_list[i].ts == irq_item.ts:
+                    irq_index = i
+                    break
+            if irq_index == 0:
+                self.db.post_opts.timeline_add_phase(
+                    ev, ev.tid, SCHED_IRQ, SCHED_RUNNING)
+                self.db.post_opts.timeline_add_phase(
+                    ev, irq_tid, SCHED_RUNNING, SCHED_IDLE)
+                return
+            pre_status = tl_list[irq_index - 1].sched_status
+            self.db.post_opts.timeline_pop_phase(irq_tid)
+            for i in range(irq_index, len(tl_list)):
+                new_item = copy.copy(tl_list[i])
+                self.db.post_opts.timeline_push_phase(irq_tid, new_item)
+                if new_item.ev.tid == irq_tid:
+                    tl_list[i].ev_list = []
+                    new_item.sched_status = SCHED_RUNNING
+                else:
+                    new_item.ev_list = []
             self.db.post_opts.timeline_add_phase(
-                ev, ev.tid, SCHED_ANY, SCHED_RUNNING)
+                ev, ev.tid, SCHED_IRQ, SCHED_RUNNING)
+            self.db.post_opts.timeline_add_phase(
+                ev, ev.tid, SCHED_IRQ, pre_status)
+            ev.tid = irq_tid
             return
 
         def softirq_pre_init(self, ev):
@@ -1107,6 +1140,12 @@ class trace_event_database:
             return
 
         def softirq_raise_timeline(self, ev, sched_attrs):
+            tid = self.db.get_softirq_tid(int(ev.priv[FTRACE_SOFTIRQ_INDEX]))
+            self.db.post_opts.timeline_add_phase(
+                ev, tid, SCHED_ANY, SCHED_RUNABLE)
+            self.db.post_opts.timeline_set_bind(
+                ev.tid, tid, self.db.get_bind_id())
+            ev.tid = tid
             return
 
         def default_pre_init(self, ev):
@@ -1256,16 +1295,15 @@ class trace_event_database:
             "softirq_entry": self.event_opt(
                 self, "irq",
                 self.event_opt.softirq_pre_init,
-                sched_attrs=sched_attr(
-                    SCHED_ANY, SCHED_SOFTIRQ, EVENT_CAT_EVENT),),
+                timeline_opt=self.event_opt.softirq_entry_timeline,),
             "softirq_exit": self.event_opt(
                 self, "irq",
                 self.event_opt.softirq_pre_init,
-                sched_attrs=sched_attr(
-                    SCHED_ANY, SCHED_RUNNING, EVENT_CAT_EVENT),),
+                timeline_opt=self.event_opt.softirq_exit_timeline,),
             "softirq_raise": self.event_opt(
                 self, "irq",
-                self.event_opt.softirq_pre_init,),
+                self.event_opt.softirq_pre_init,
+                timeline_opt=self.event_opt.softirq_raise_timeline),
             "<stack": self.event_opt(self, "ftrace",
                                      self.event_opt.ftrace_stack_pre_init,
                                      self.event_opt.ftrace_insert_stack),
