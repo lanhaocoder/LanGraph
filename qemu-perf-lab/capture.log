@@ -1,0 +1,18 @@
+start perf capture
+start ftrace capture
+Capture for 20 seconds start.
+Enter Ctrl+C to stop capture...
+Saving results, please wait
+save ftrace start
+[ perf record: Woken up 1 times to write data ]
+[ perf record: Captured and wrote 12.224 MB perf.data (63828 samples) ]
+Get ftrace format start...
+Get ftrace user symbol start...
+'trace' not valid for hardware events. Ignoring.
+'trace' not valid for software events. Ignoring.
+'trace' not valid for hardware-cache events. Ignoring.
+'trace' not valid for unknown events. Ignoring.
+'trace' not valid for unknown events. Ignoring.
+'trace' not valid for unknown events. Ignoring.
+'trace' not valid for unknown events. Ignoring.
+result is /work/langraph

@@ -1,0 +1,23 @@
+# get_ftrace.sh 原生产物归档清单
+#
+# 采集: QEMU TCG Guest 6.8.0-31-generic, nokaslr, -t 20 -p 1 -z 0 -o langraph
+# 负载: 宿主机 iperf3 -P 20 --bidir -t 15 (40 流)
+# 归档: tar + gzip -9 (pigz, 多线程), 无损, gzip -t 通过
+#
+文件                                        原始大小            行数  说明                    
+------------------------------------------------------------------------------------------
+capture.log                            0.00 MB              18  采集脚本输出                
+ftrace.log                           122.69 MB       2,227,814  ftrace 原始事件流          
+ftrace_format.log                      0.02 MB             503  事件 format 定义          
+ftrace_symbol.log                      0.04 MB             454  用户栈 addr2line 结果      
+kallsyms.txt                           8.66 MB         203,527  运行时符号表(含模块)           
+modules.txt                            0.00 MB               1  已加载模块及基址              
+perf.data                             12.23 MB            二进制  perf 原始采样(可重新解析)      
+perf.log                              60.29 MB       1,141,976  perf script 符号化文本     
+version.txt                            0.00 MB               1  内核构建信息                
+------------------------------------------------------------------------------------------
+合计                                   203.93 MB
+归档大小: 9.23 MB  压缩率: 4.5%
+归档 sha256: 64b296e81f4dac54717d26ba5ac2cf367883251a1c25a7884369e000fe50623f
+
+# 解压: tar xzf langraph.tar.gz  → 得到 langraph/ 目录

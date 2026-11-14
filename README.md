@@ -472,3 +472,19 @@ format:
 
 print fmt: "vec=%u [action=%s]", REC->vec, __print_symbolic(REC->vec, { 0, "HI" }, { 1, "TIMER" }, { 2, "NET_TX" }, { 3, "NET_RX" }, { 4, "BLOCK" }, { 5, "IRQ_POLL" }, { 6, "TASKLET" }, { 7, "SCHED" }, { 8, "HRTIMER" }, { 9, "RCU" })
 root@lanhao-VirtualBox:/home/lanhao#
+
+## 配套实验：QEMU 下的 ftrace/perf 采集
+
+`qemu-perf-lab/` 存放了一份可离线分析的采集归档，完整实验工程见
+https://github.com/lanhaocoder/langraph-qemu-perf-lab 。
+
+- 云沙箱宿主机禁用 `perf_event_open` 且无 tracefs，改用 **QEMU TCG Guest**（独立内核）跑通 `get_ftrace.sh`
+- `get_ftrace.sh -t 20 -p 1 -o langraph` **同时采集 perf 与 ftrace**，生成脚本原生的 `langraph/` 目录
+- `qemu-perf-lab/langraph.tar.gz`（9.23 MB，204 MB 压缩而来）内含 `perf.data`、`perf.log`、
+  `ftrace.log`、`ftrace_symbol.log`、运行时 `kallsyms.txt`；Guest 以 `nokaslr` 启动，
+  符号地址与 `perf.data` 严格对应，可直接 `perf script --kallsyms kallsyms.txt -i perf.data` 重新解析
+- `run-langraph.sh` / `guest-init.sh` 为该轮采集的复现脚本
+
+注意：TCG 为纯软件模拟，采到的时序、带宽、调度延迟不具备真实性能意义，
+只能用于验证代码路径、符号热点与采集链路；perf 使用 `cpu-clock` 软件事件（TCG 不虚拟硬件 PMU）。
+
