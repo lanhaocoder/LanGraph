@@ -77,6 +77,7 @@ WANTED = {
     "sched_process_free", "sched_process_wait",
     "irq_handler_entry", "irq_handler_exit",
     "softirq_raise", "softirq_entry", "softirq_exit",
+    "napi_poll",
     "tasklet_entry", "tasklet_exit",
 }
 
@@ -315,6 +316,10 @@ class Converter:
         # 起点挂在 G_IRQ 轨，终点落在被唤醒任务上 CPU 的 G_CPU 轨。
         self.causal_fid = {}          # cpu -> fid（当前打开的因果流，None 表示无）
         self.causal_softirq_seen = {} # cpu -> bool（本次中断是否已产生 softirq）
+        # softirq_exit 时因果流先「挂起」而不是立刻 end：真实内核里
+        # sched_waking 常发生在软中断退出之后几十~几百 µs（尤其 TCG 下），
+        # 立即 end 会把「硬中断→上CPU」链拦腰截断。挂起窗口内若有唤醒则复活该流。
+        self.pending_close = {}       # cpu -> (fid, ts_us, vec)
 
     # ---------------- 文件 IO ----------------
     def _open_input(self):
@@ -464,6 +469,18 @@ class Converter:
                            args or {"note": reason}, group=G_IRQ)
             self.causal_fid[cpu] = None
             self.causal_softirq_seen[cpu] = False
+
+    def _flush_pending_close(self, cpu):
+        """把 softirq_exit 挂起、但窗口内始终没等到唤醒的因果流收尾。
+
+        end 时间点用挂起时刻（软中断退出），这样箭头不会拖到下一个硬中断。
+        """
+        pc = self.pending_close.pop(cpu, None)
+        if pc:
+            fid, t0, vec = pc
+            self.emit_flow(cpu, t0, fid, "软中断结束(未唤醒任务)", "end",
+                           {"vec": vec, "note": "窗口内无唤醒，链在软中断出口收尾"},
+                           group=G_IRQ)
 
     # ---------------- Pass 1：扫描统计 + 收集 track ----------------
     def scan(self):
@@ -685,18 +702,34 @@ class Converter:
             if ev == "sched_waking":
                 entry = {"fid": None, "ts_waking": us, "ts_wakeup": None,
                          "cpu": tcpu, "causal_fid": None}
-                if self.causal_fid.get(cpu) is not None:
+                # 优先用仍打开的因果流；若已在 softirq_exit 挂起，且距挂起
+                # 不超过 2ms（本轮实测 99.1% 的硬中断后唤醒落在 2ms 内），
+                # 则复活它——真实内核里 sched_waking 常在软中断退出之后到达，
+                # 旧实现在 softirq_exit 立即 end，会把完整链拦腰截断。
+                cfid = self.causal_fid.get(cpu)
+                from_open = cfid is not None
+                if cfid is None:
+                    pc = self.pending_close.get(cpu)
+                    if pc and us - pc[1] <= 2000:
+                        cfid = pc[0]
+                        self.pending_close.pop(cpu, None)
+                    else:
+                        self._flush_pending_close(cpu)   # 超时：收尾旧挂起流
+                if cfid is not None:
                     # 本次唤醒由本 CPU 上的硬中断/软中断引发：把因果流从
                     # IRQ 轨续接到唤醒点，并随 pending 带到 switch 处收尾
                     # （终点落在被唤醒任务上 CPU 的 G_CPU 轨，形成跨轨箭头）。
-                    entry["causal_fid"] = self.causal_fid[cpu]
+                    if from_open:
+                        self.causal_fid[cpu] = None
+                        self.causal_softirq_seen[cpu] = False
+                    entry["causal_fid"] = cfid
                     self.st["flow_total"] += 1
-                    self.emit_flow(cpu, us, entry["causal_fid"],
+                    self.emit_flow(cpu, us, cfid,
                                    "中断/软中断 → 唤醒 %s" % kv.get("comm", ""), "step",
                                    {"woken_pid": wpid, "comm": kv.get("comm", ""),
-                                    "target_cpu": tcpu}, group=G_IRQ)
-                    self.causal_fid[cpu] = None          # 已移交 pending，等 switch 收尾
-                    self.causal_softirq_seen[cpu] = False
+                                    "target_cpu": tcpu,
+                                    "chain": "软中断内" if from_open else "软中断退出后续接"},
+                                   group=G_IRQ)
                 else:
                     # 非中断引发（任务自发唤醒）：普通 wake2run 流，起点在 CPU 轨
                     self.flow_seq += 1
@@ -780,7 +813,8 @@ class Converter:
 
         # ---------- 中断 / 软中断 ----------
         if ev == "irq_handler_entry":
-            # 新硬中断到来：先收尾本 CPU 上残留（被嵌套）的因果流，再开新流
+            # 新硬中断到来：先收尾上一条挂起流，再收尾残留（被嵌套）的因果流
+            self._flush_pending_close(cpu)
             if self.causal_fid.get(cpu) is not None:
                 self._close_intr(cpu, us, "硬中断被嵌套/打断（前一条未收尾）")
             self.flow_seq += 1
@@ -825,16 +859,47 @@ class Converter:
                                    "note": "硬中断里只置位，执行在 softirq_entry"},
                                   track_name="CPU%d IRQ / softirq" % cpu)
             return
+        if ev == "napi_poll":
+            # 格式是自由文本（非 key=value）：
+            #   "napi poll on napi struct <addr> for device eth0 work 0 budget 64"
+            # work < budget 表示本轮 RX 队列已排空 → napi_complete() 写 IMS 重开中断。
+            rest = d["rest"]
+            mdev = re.search(r"for device\s+(\S+)", rest)
+            mwork = re.search(r"\bwork\s+(\d+)", rest)
+            mbud = re.search(r"\bbudget\s+(\d+)", rest)
+            dev = mdev.group(1) if mdev else "?"
+            work = mwork.group(1) if mwork else "?"
+            bud = mbud.group(1) if mbud else "?"
+            if not self.opts.no_irq:
+                # 因果流仍打开（napi_poll 恰好落在唤醒之前）→ 续接一个 step；
+                # 若晚于唤醒则 causal_fid 已移交 pending，这里不追加，避免箭头倒序。
+                if self.causal_fid.get(cpu) is not None:
+                    self.emit_flow(cpu, us, self.causal_fid[cpu],
+                                   "NAPI poll %s work=%s" % (dev, work), "step",
+                                   {"device": dev, "work": work, "budget": bud},
+                                   group=G_IRQ)
+                self.emit_instant(G_IRQ, ("irq", cpu),
+                                  "napi_poll %s work=%s budget=%s" % (dev, work, bud),
+                                  us, "napi",
+                                  {"device": dev, "work": work, "budget": bud,
+                                   "note": "work<budget 表示 RX 队列排空，napi_complete 写 IMS 重开硬中断"},
+                                  track_name="CPU%d IRQ / softirq" % cpu)
+            return
         if ev == "softirq_entry":
             vec, act = kv.get("vec", "?"), kv.get("action", "")
             self._irq_push(cpu, us, "softirq vec=%s [%s]" % (vec, act), "softirq",
                            {"vec": vec, "action": act, "flags": flags})
             return
         if ev == "softirq_exit":
-            # 软中断执行完也没唤醒任务 → 在此闭合因果流
+            # 软中断退出时先「挂起」因果流而不是立刻 end：
+            # sched_waking 常在软中断退出之后到达，2ms 内若来唤醒就复活该流，
+            # 否则由下一个硬中断 / trace 结束统一收尾（见 _flush_pending_close）。
             if self.causal_fid.get(cpu) is not None:
-                self._close_intr(cpu, us, "软中断结束(未唤醒任务) vec=%s" % kv.get("vec", "?"),
-                                {"vec": kv.get("vec")})
+                self._flush_pending_close(cpu)     # 先清掉更早的挂起流
+                fid = self.causal_fid[cpu]
+                self.causal_fid[cpu] = None
+                self.causal_softirq_seen[cpu] = False
+                self.pending_close[cpu] = (fid, us, kv.get("vec", "?"))
             self._irq_pop(cpu, us, match="softirq")
             return
         if ev == "tasklet_entry":
@@ -904,6 +969,11 @@ class Converter:
         for cpu in list(self.irq_open):
             while self.irq_open[cpu]:
                 self._irq_pop(cpu, t_end)
+        # 收尾所有挂起/残留的因果流，避免生成 dangling flow
+        for cpu in list(self.pending_close):
+            self._flush_pending_close(cpu)
+        for cpu in list(self.causal_fid):
+            self._close_intr(cpu, t_end, "trace 结束(未唤醒)")
 
         paths = {}
         if self.jw:

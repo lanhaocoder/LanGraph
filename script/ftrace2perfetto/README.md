@@ -241,14 +241,47 @@ enclosing slice 上，端点是有宽度的 slice，更好点选。这是已知�
 4. 点选紫色三角 ▲ 或 slice → 箭头出现，详情面板出现 Flow 字段。
 
 数据本身完整：全量 pftrace 有 43,954 条 flow、4,641 条跨轨、零 health 告警。
-另：QEMU/virtio 下 `irq_handler_entry` 只抓到 74 条，因果链绝大多数从软中断（NET_RX）起。
 
-详见 `langraph-qemu-perf-lab/iperf-lifecycle/perfetto/README.md` 与 `causal-chain-result.html`。
+**更正一处之前的错误判断**：当时写「硬中断少是抓包没 enable `irq/irq_handler_entry`、
+需重抓补齐」是错的——tracepoint 一直开着（`irq_handler_entry/exit` 74/74 成对）。
+真正原因是 **e1000 驱动的 NAPI 中断屏蔽**：`e1000_intr()` 写 IMC 关中断 →
+`__napi_schedule()` → NET_RX softirq 里 `e1000_clean()` 批量收包；持续大流量下
+RX 队列不排空，就一直停在 polling，不 `napi_complete()` 重开中断，
+所以稳定打流 10 s 内 eth0 硬中断为 0，因果链只能从 NET_RX 软中断起点。
+
+**本轮已低速重抓验证**：流量改成 `-P 2 -b 1M -l 256`（2.0 Mbps），包间隔拉到
+ms 级，每轮 poll 都能排空队列、重开中断。实测 `irq_handler_entry: irq=11 eth0`
+从 66 → **18,522**，与 NET_RX raise 15,184 约 1.2 : 1，
+`/proc/interrupts` IRQ11 增量 +18,698，并抓到 4,886 条「硬中断 → 上CPU」完整链。
+
+工具本轮两处改动：
+① 支持 `napi_poll` 事件（自由文本解析 `device/work/budget`，在 IRQ 轨发 instant 并续接 flow）；
+② `softirq_exit` 不再立即 end 因果流，改为挂起、2 ms 内的 `sched_waking` 复活它，
+   让硬中断链能闭合到「上CPU运行」（闭合数 3,044 → 4,886）。
+
+归档见 `langraph-qemu-perf-lab/iperf-hardirq/`（采集脚本、原始日志、统计结果）与
+`langraph-qemu-perf-lab/iperf-hardirq/perfetto/`（trace、结果页、校验报告）。
+
+**本轮工具代码同步更新**：`ftrace2perfetto.py` 新增 `napi_poll` 解析与
+`softirq_exit` 挂起/复活逻辑，已随本轮一并归档到 `LanGraph`。
+
+### 已知限制（待修）
+
+`.pftrace` 的 flow 端点目前全部是 `dur=0` 的 instant，Perfetto UI 对 instant 端点的
+箭头渲染不如落在有宽度 slice 上稳妥；`.json` 版本端点多数落在 slice 内。
+需要肉眼确认箭头时优先用 `.json`，或看 `hardirq-result.html`。
+把 pftrace 端点改成带 `dur` 的 slice 是后续待修项，不影响数据完整性。
 
 ---
 
 ## 11. 状态
 
 工具本体已归档到 `LanGraph/script/ftrace2perfetto/`，
-trace 产物已归档到 `langraph-qemu-perf-lab/iperf-lifecycle/perfetto/`。
+trace 产物已归档到 `langraph-qemu-perf-lab/iperf-lifecycle/perfetto/`（实验 4）与
+`langraph-qemu-perf-lab/iperf-hardirq/perfetto/`（实验 5，完整硬中断链）。
 全部通过官方 `trace_processor_shell v59.1` 校验（零 health 告警）。
+
+实验 5 新增产物：`iperf-hardirq-chain.*`（3 ms 单条完整链）、
+`iperf-hardirq-full.*`（26 s 全量）、`hardirq-chain-preview.png`、
+`hardirq-result.html`、`verify-hardirq.json`；原始采集在 `langraph-qemu-perf-lab/iperf-hardirq/`。
+两个仓库的旧错误说明（「需 enable `irq_handler_entry` 后重抓」）已一并更正。

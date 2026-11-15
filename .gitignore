@@ -50,3 +50,8 @@ modules.order
 Module.symvers
 Mkfile.old
 dkms.conf
+
+# 本地编译产物与 Python 缓存（不入库）
+/langraph
+__pycache__/
+*.pyc
