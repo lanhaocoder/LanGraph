@@ -187,7 +187,7 @@ python3 ftrace2perfetto.py langraph/ftrace.log -o out/zoom.json \
     --start 16.9045 --end 16.9080 --focus iperf3
 python3 verify.py "out/*.pftrace" "out/*.json" --json-out out/verify.json
 python3 preview.py out/iperf-zoom.json -o out/overview.png</pre>
-  <div class="note"><b>当前状态：已本地生成并通过官方 trace_processor_shell 校验（零 health 告警），待归档到 LanGraph / langraph-qemu-perf-lab。</b>确认满意后再归档到
+  <div class="note"><b>当前状态：已归档到 LanGraph（工具本体）与 langraph-qemu-perf-lab（trace 产物），官方 trace_processor_shell 校验零 health 告警。关于 Perfetto UI 里 flow 箭头需点选才显示，见 README 第 10 节。</b>确认满意后再归档到
     <code>LanGraph</code> / <code>langraph-qemu-perf-lab</code>（按你指定的仓库）。</div>
 </section>
 

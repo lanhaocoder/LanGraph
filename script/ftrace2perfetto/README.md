@@ -223,7 +223,32 @@ python3 verify.py "out/iperf-*.pftrace" "out/iperf-*.json" --json-out out/verify
 
 ---
 
-## 10. 状态
+## 10. 已知限制：在 Perfetto UI 里查看因果链
 
-文件已在本地生成并通过官方 `trace_processor_shell` 校验（零告警），
-待归档到 `LanGraph`（工具本体）/ `langraph-qemu-perf-lab`（生成的 trace）。
+官方文档原话：*"The link is displayed as an arrow in the UI, when one of the events is selected."*
+即 flow 箭头**不会默认全画**，必须点选某个端点事件才显示。全量 26 s 视图下看不到箭头属正常。
+
+当前 `.pftrace` 的 flow 端点全部是 `dur=0` 的 instant（`flow_ids=47` / `terminating_flow_ids=48`），
+UI 里渲染成 1px 紫色三角 ▲，不容易点中；`.json` 版因 Chrome JSON 导入器会把 `ph:s/f` 贴到
+enclosing slice 上，端点是有宽度的 slice，更好点选。这是已知的**两种格式不对称**，待修项：
+把 pftrace 端点改为有宽度的 slice。
+
+查看步骤：
+
+1. 用窄窗口文件（`iperf-chain.pftrace` / `.json`，2.4 ms），别用 26 s 全量；
+2. 展开「CPU 运行泳道」「IRQ/softirq 轨」；
+3. 滚轮放大到 0.5~2 ms 视野；
+4. 点选紫色三角 ▲ 或 slice → 箭头出现，详情面板出现 Flow 字段。
+
+数据本身完整：全量 pftrace 有 43,954 条 flow、4,641 条跨轨、零 health 告警。
+另：QEMU/virtio 下 `irq_handler_entry` 只抓到 74 条，因果链绝大多数从软中断（NET_RX）起。
+
+详见 `langraph-qemu-perf-lab/iperf-lifecycle/perfetto/README.md` 与 `causal-chain-result.html`。
+
+---
+
+## 11. 状态
+
+工具本体已归档到 `LanGraph/script/ftrace2perfetto/`，
+trace 产物已归档到 `langraph-qemu-perf-lab/iperf-lifecycle/perfetto/`。
+全部通过官方 `trace_processor_shell v59.1` 校验（零 health 告警）。
