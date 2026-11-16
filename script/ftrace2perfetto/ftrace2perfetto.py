@@ -30,6 +30,11 @@ ftrace2perfetto.py — 把 ftrace 文本日志转换成 Perfetto 可打开的调
 6. 中断侧：`irq_handler_entry/exit`、`softirq_entry/exit`、`tasklet_*` 画成
    IRQ 泳道 slice，`softirq_raise` 画成 instant（硬中断里只 raise，不执行）。
 7. 时间戳：ftrace 是秒（6 位小数），Chrome/Perfetto 用微秒，×1e6 不丢精度。
+8. `--stacks` 载入逐条堆栈索引后，每个 tracepoint 产生的 slice / instant / flow
+   的 args 会带上 `stack_start`（栈顶起始帧）、`stack_end`（栈底末尾帧）、
+   `stack_depth`。索引由 `tracepoint_stacks.py --events-out` 生成。
+9. **S 可中断睡眠默认不显示**：状态轨上 S 段留白（只闭合上一段、不再新开），
+   `--show-sleep-state` 可恢复。CPU 运行轨与 IRQ 轨不受影响。
 
 用法
 ----
@@ -289,6 +294,11 @@ class Converter:
         self.opts = opts
         self.jw = None
         self.pw = None
+        # 每个 tracepoint 的「起始 / 末尾堆栈」，来自 tracepoint_stacks.py 的逐条索引
+        self.stack_map = {}
+        self.cur_stack_args = {}
+        if getattr(opts, "stacks", None):
+            self._load_stacks(opts.stacks)
         self.tracks = {}            # key -> (group, tid, uuid, name)
         self.group_uuid = {}        # group -> parent uuid
         self.next_uuid = 10000
@@ -321,6 +331,40 @@ class Converter:
         # 立即 end 会把「硬中断→上CPU」链拦腰截断。挂起窗口内若有唤醒则复活该流。
         self.pending_close = {}       # cpu -> (fid, ts_us, vec)
 
+    def _load_stacks(self, path):
+        """加载逐条堆栈索引（tracepoint_stacks.py --events-out 产出的 JSONL）。
+
+        key = (ts 原始字符串, cpu:int, event, pid:int) -> [条目, ...]
+        用 list 而非 pop，保证 Pass1 / Pass2 各自维护独立游标、互不干扰。
+        """
+        op = gzip.open if path.endswith(".gz") else open
+        n = 0
+        with op(path, "rt", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                key = (str(r["ts"]), int(r["cpu"]), r["event"], int(r["pid"]))
+                self.stack_map.setdefault(key, []).append(r)
+                n += 1
+        sys.stderr.write("[stacks] 载入 %d 条逐条堆栈索引（%d 个 key）\n"
+                         % (n, len(self.stack_map)))
+
+    def _stack_args(self, d):
+        """把当前事件的「起始 / 末尾堆栈」转成 Perfetto args。"""
+        s = d.get("stack")
+        if not s:
+            return {}
+        return {
+            "stack_start": s.get("start", ""),
+            "stack_end": s.get("end", ""),
+            "stack_depth": s.get("depth", 0),
+        }
+
     # ---------------- 文件 IO ----------------
     def _open_input(self):
         p = self.opts.input
@@ -329,10 +373,16 @@ class Converter:
         return open(p, "r", encoding="utf-8", errors="replace")
 
     def _iter(self):
-        """逐行解析，产出 dict；跳过栈帧与注释。"""
+        """逐行解析，产出 dict；跳过栈帧与注释。
+
+        若给了 --stacks，按 (ts 字符串, cpu, event, pid) 查逐条堆栈索引，
+        把「起始 / 末尾堆栈」挂到 d["stack"] 上。Pass1 / Pass2 各自维护
+        独立的 used 游标，互不干扰。
+        """
         cpus = None
         if self.opts.cpus:
             cpus = set(int(x) for x in self.opts.cpus.split(",") if x.strip())
+        used = defaultdict(int)
         with self._open_input() as f:
             for line in f:
                 self.st["lines"] += 1
@@ -351,7 +401,8 @@ class Converter:
                     self.st["skipped_lines"] += 1
                     continue
                 d = m.groupdict()
-                d["ts"] = float(d["ts"])
+                ts_raw = d["ts"]
+                d["ts"] = float(ts_raw)
                 d["cpu"] = int(d["cpu"])
                 d["pid"] = int(d["pid"])
                 if cpus is not None and d["cpu"] not in cpus:
@@ -361,6 +412,15 @@ class Converter:
                 except ValueError:
                     d["tgid"] = None
                 d["kv"] = {k: v for k, v in KV_RE.findall(d["rest"])}
+                # 每个 tracepoint 的起始 / 末尾堆栈
+                if self.stack_map:
+                    key = (ts_raw, d["cpu"], ev, d["pid"])
+                    i = used[key]
+                    used[key] += 1
+                    lst = self.stack_map.get(key)
+                    d["stack"] = lst[i] if lst and i < len(lst) else None
+                else:
+                    d["stack"] = None
                 yield d
 
     # ---------------- track 注册 ----------------
@@ -419,6 +479,8 @@ class Converter:
     # ---------------- 统一 emit ----------------
     def emit_slice(self, group, key, name, ts, dur, cat, args, track_name=None,
                    flow=None, term_flow=None):
+        if self.cur_stack_args:
+            args = {**self.cur_stack_args, **(args or {})}
         if track_name is None:
             track_name = name
         _, tid, uuid, _ = self._track_key(group, key, track_name)
@@ -431,6 +493,8 @@ class Converter:
 
     def emit_instant(self, group, key, name, ts, cat, args, track_name=None,
                      flow=None, term_flow=None):
+        if self.cur_stack_args:
+            args = {**self.cur_stack_args, **(args or {})}
         if track_name is None:
             track_name = "事件"
         _, tid, uuid, _ = self._track_key(group, key, track_name)
@@ -443,6 +507,8 @@ class Converter:
     def emit_flow(self, cpu, ts, fid, name, kind, args, group=None):
         """kind: 'start' | 'step' | 'end'；group 默认 G_CPU，
         中断→软中断→唤醒 这条因果链挂在 G_IRQ 轨上。"""
+        if self.cur_stack_args:
+            args = {**self.cur_stack_args, **(args or {})}
         if group is None:
             group = G_CPU
         if group == G_IRQ:
@@ -559,7 +625,7 @@ class Converter:
             return True
         return pid in self.st["focus_tids"]
 
-    def _set_state(self, pid, state, ts, comm=None, cpu=None):
+    def _set_state(self, pid, state, ts, comm=None, cpu=None, raw=None):
         if self.opts.no_thread_state or not self._visible(pid):
             return
         if comm:
@@ -572,6 +638,11 @@ class Converter:
                             cur["ts"], ts - cur["ts"], "state",
                             {"tid": pid, "comm": comm or self.comm_by_pid.get(pid, "")},
                             track_name=label + " 状态")
+        # S 可中断睡眠默认不显示：上一段已闭合，这里不再新开，状态轨上留白
+        if not getattr(self.opts, "show_sleep_state", False) and \
+                (raw or "").rstrip("+").upper().startswith("S"):
+            self.state_open.pop(tk, None)
+            return
         self.state_open[tk] = {"state": state, "ts": ts, "label": label,
                                "comm": comm or self.comm_by_pid.get(pid, "")}
 
@@ -687,7 +758,8 @@ class Converter:
             next_comm = kv.get("next_comm", "?")
             self.comm_by_pid.setdefault(next_pid, next_comm)
             self._close_cpu(cpu, us, prev_state)
-            self._set_state(prev_pid, state_label(prev_state), us, kv.get("prev_comm"), cpu)
+            self._set_state(prev_pid, state_label(prev_state), us,
+                            kv.get("prev_comm"), cpu, raw=prev_state)
             self._open_cpu(cpu, us, next_pid, next_comm, tgid, flags, prev_state)
             self._set_state(next_pid, "RUNNING 正在 CPU 上运行", us, next_comm, cpu)
             return
@@ -953,7 +1025,9 @@ class Converter:
                                 track_name="CPU%d IRQ / softirq" % cpu)
 
         for d in self._iter():
+            self.cur_stack_args = self._stack_args(d)
             self._on_event(d)
+            self.cur_stack_args = {}
 
         # 收尾：把所有打开的 slice 关到 tmax
         t_end = (self.opts.end * 1e6) if self.opts.end is not None else self.st["tmax"] * 1e6
@@ -1007,11 +1081,14 @@ class Converter:
                 "no_irq": self.opts.no_irq, "no_flow": self.opts.no_flow,
                 "no_thread_state": self.opts.no_thread_state,
                 "no_lifecycle": self.opts.no_lifecycle,
+                "stacks": getattr(self.opts, "stacks", None),
+                "hide_sleep_state": not getattr(self.opts, "show_sleep_state", False),
             },
             "elapsed_sec": round(elapsed, 2),
             "input_stats": {
                 "total_lines": self.st["lines"],
                 "stack_lines": self.st["stack_lines"],
+                "stack_index_entries": sum(len(v) for v in self.stack_map.values()),
                 "skipped_lines": self.st["skipped_lines"],
                 "tracepoint_events": sum(self.st["in_events"].values()),
                 "event_counts": dict(self.st["in_events"].most_common()),
@@ -1061,6 +1138,10 @@ def build_parser():
     p.add_argument("--no-flow", action="store_true", help="不生成唤醒 flow 箭头")
     p.add_argument("--no-thread-state", action="store_true", help="不生成线程状态轨")
     p.add_argument("--no-lifecycle", action="store_true", help="不生成进程生命周期轨")
+    p.add_argument("--stacks", help="逐条堆栈索引 JSONL（tracepoint_stacks.py --events-out 产出，支持 .gz）；"
+                                    "给每个 tracepoint 加 stack_start / stack_end / stack_depth")
+    p.add_argument("--show-sleep-state", action="store_true",
+                   help="显示 S 可中断睡眠状态段（默认不显示，状态轨上留白）")
     p.add_argument("--max-tracks", type=int, default=1200, help="最多建多少条状态/生命周期轨")
     p.add_argument("--gzip", action="store_true", help="JSON 输出用 gzip 压缩")
     p.add_argument("--stats", help="统计报告 JSON 路径（默认 <output>.stats.json）")

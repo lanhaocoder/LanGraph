@@ -274,11 +274,31 @@ ms 级，每轮 poll 都能排空队列、重开中断。实测 `irq_handler_ent
 
 ---
 
+## 12. 带调用栈标注（实验 6）
+
+新增 `tracepoint_stacks.py`：解析每个 tracepoint 后面的 `<stack trace>` / `<user stack trace>`，
+输出逐条索引（`start/end/start_sym/end_sym/depth`）。`ftrace2perfetto.py` 新增
+`--stacks <jsonl.gz>`，把三个字段挂到 tracepoint 产生的 slice / instant / flow 上；新增
+`--show-sleep-state` 开关，**默认隐藏 S 可中断睡眠段**（D 等其它状态保留）。
+
+「起始/末尾堆栈」定义：ftrace 跟的是**一个完整内核栈**（栈顶→栈底），
+`stack_start` = 栈顶第一帧（直接触发点），`stack_end` = 栈底最后一帧（调用链入口）。
+例：`irq_handler_entry` 起始帧 100% 是 `__handle_irq_event_percpu`，
+`sched_waking` 100% 是 `try_to_wake_up`。归属按 `<stack trace>` 标记行自带的 CPU，
+否则 4 CPU buffer 合并时会串轨。
+
+产物归档在 `langraph-qemu-perf-lab/iperf-hardirq/perfetto/stacks/`：
+单链原件 + 全量 gzip（97 MB→3.6 MB）+ 逐条索引 + 校验报告，四份零 health 告警。
+该目录只含 Perfetto 文件与数据索引，无 HTML/PNG 展示物。
+
+---
+
 ## 11. 状态
 
 工具本体已归档到 `LanGraph/script/ftrace2perfetto/`，
-trace 产物已归档到 `langraph-qemu-perf-lab/iperf-lifecycle/perfetto/`（实验 4）与
-`langraph-qemu-perf-lab/iperf-hardirq/perfetto/`（实验 5，完整硬中断链）。
+trace 产物已归档到 `langraph-qemu-perf-lab/iperf-lifecycle/perfetto/`（实验 4）、
+`langraph-qemu-perf-lab/iperf-hardirq/perfetto/`（实验 5，完整硬中断链）与
+`iperf-hardirq/perfetto/stacks/`（实验 6，带堆栈）。
 全部通过官方 `trace_processor_shell v59.1` 校验（零 health 告警）。
 
 实验 5 新增产物：`iperf-hardirq-chain.*`（3 ms 单条完整链）、
