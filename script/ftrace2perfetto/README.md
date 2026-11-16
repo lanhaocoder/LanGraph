@@ -278,8 +278,16 @@ ms 级，每轮 poll 都能排空队列、重开中断。实测 `irq_handler_ent
 
 新增 `tracepoint_stacks.py`：解析每个 tracepoint 后面的 `<stack trace>` / `<user stack trace>`，
 输出逐条索引（`start/end/start_sym/end_sym/depth`）。`ftrace2perfetto.py` 新增
-`--stacks <jsonl.gz>`，把三个字段挂到 tracepoint 产生的 slice / instant / flow 上；新增
-`--show-sleep-state` 开关，**默认隐藏 S 可中断睡眠段**（D 等其它状态保留）。
+`--stacks <jsonl.gz>`，把三个字段挂到 tracepoint 产生的 slice / instant / flow 上。
+
+**等待/终止态事件化**：S/D 睡眠、Z 僵尸、X 退出默认画成 **instant 事件点**（args 带
+`state`/`comm`/`tid`/`raw` 与堆栈字段），不再铺满状态轨；R/RUNNING/I 等活跃态仍是时段 slice。
+`--show-sleep-state` 语义已反转为「把这些态改回时段 slice」。全量实测：事件点 20,282 个
+（S 20,207 / Z 39 / X 31 / D 5），活跃时段 79,665 段，S/D/Z/X 时段 slice 归零。
+
+**压缩归档**：全量 trace 以 gzip -9 压缩（`.pftrace.gz` 4.7 MB / `.json.gz` 3.9 MB，
+原件 88.8/106.6 MB），Perfetto UI 与 `trace_processor_shell` 均可直接读 `.gz` 自动解压，
+已实测压缩版与原件查询结果完全一致。
 
 「起始/末尾堆栈」定义：ftrace 跟的是**一个完整内核栈**（栈顶→栈底），
 `stack_start` = 栈顶第一帧（直接触发点），`stack_end` = 栈底最后一帧（调用链入口）。

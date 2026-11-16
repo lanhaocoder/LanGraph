@@ -33,8 +33,9 @@ ftrace2perfetto.py — 把 ftrace 文本日志转换成 Perfetto 可打开的调
 8. `--stacks` 载入逐条堆栈索引后，每个 tracepoint 产生的 slice / instant / flow
    的 args 会带上 `stack_start`（栈顶起始帧）、`stack_end`（栈底末尾帧）、
    `stack_depth`。索引由 `tracepoint_stacks.py --events-out` 生成。
-9. **S 可中断睡眠默认不显示**：状态轨上 S 段留白（只闭合上一段、不再新开），
-   `--show-sleep-state` 可恢复。CPU 运行轨与 IRQ 轨不受影响。
+9. **等待 / 终止态用事件点表示**：S/D 睡眠、Z 僵尸、X 退出默认画成 instant 事件
+   （名称、tid、comm、state 在 args 里），不占时段；R / RUNNING / I 等活跃态仍是
+   slice 时段。`--show-sleep-state` 可把它们改回时段 slice。CPU 运行轨与 IRQ 轨不受影响。
 
 用法
 ----
@@ -101,6 +102,11 @@ STATE_NAME = {
     "Z": "Z 僵尸", "K": "K 内核唤醒", "W": "W 唤醒中", "P": "P 暂停",
     "N": "N 待运行", "RUN": "RUNNING 正在 CPU 上运行",
 }
+
+# 这些「等待 / 终止态」用 instant 事件点表示（不占时段）：
+# S/D 睡眠与 Z/X 僵尸退出用 slice 会把状态轨铺满长条，改成事件更清爽。
+# R / RUNNING / I 等活跃态继续用 slice 时段。
+EVENT_STATE_KEYS = set("SDZX")
 
 
 def state_label(prev_state: str) -> str:
@@ -638,10 +644,16 @@ class Converter:
                             cur["ts"], ts - cur["ts"], "state",
                             {"tid": pid, "comm": comm or self.comm_by_pid.get(pid, "")},
                             track_name=label + " 状态")
-        # S 可中断睡眠默认不显示：上一段已闭合，这里不再新开，状态轨上留白
-        if not getattr(self.opts, "show_sleep_state", False) and \
-                (raw or "").rstrip("+").upper().startswith("S"):
             self.state_open.pop(tk, None)
+
+        # 等待 / 终止态（S/D 睡眠、Z 僵尸、X 退出）默认画成 instant 事件点，
+        # 不占时段；--show-sleep-state 可把它们改回时段 slice。
+        key = (raw or state).strip().rstrip("+")[:1].upper()
+        if key in EVENT_STATE_KEYS and not getattr(self.opts, "show_sleep_state", False):
+            self.emit_instant(G_STATE, tk, state, ts, "state_event",
+                              {"tid": pid, "comm": comm or self.comm_by_pid.get(pid, ""),
+                               "state": key, "raw": raw or state},
+                              track_name=label + " 状态")
             return
         self.state_open[tk] = {"state": state, "ts": ts, "label": label,
                                "comm": comm or self.comm_by_pid.get(pid, "")}
@@ -1082,7 +1094,7 @@ class Converter:
                 "no_thread_state": self.opts.no_thread_state,
                 "no_lifecycle": self.opts.no_lifecycle,
                 "stacks": getattr(self.opts, "stacks", None),
-                "hide_sleep_state": not getattr(self.opts, "show_sleep_state", False),
+                "wait_states_as_event": not getattr(self.opts, "show_sleep_state", False),
             },
             "elapsed_sec": round(elapsed, 2),
             "input_stats": {
@@ -1141,7 +1153,7 @@ def build_parser():
     p.add_argument("--stacks", help="逐条堆栈索引 JSONL（tracepoint_stacks.py --events-out 产出，支持 .gz）；"
                                     "给每个 tracepoint 加 stack_start / stack_end / stack_depth")
     p.add_argument("--show-sleep-state", action="store_true",
-                   help="显示 S 可中断睡眠状态段（默认不显示，状态轨上留白）")
+                   help="把 S/D 睡眠、Z 僵尸、X 退出画成时段 slice（默认画成 instant 事件点）")
     p.add_argument("--max-tracks", type=int, default=1200, help="最多建多少条状态/生命周期轨")
     p.add_argument("--gzip", action="store_true", help="JSON 输出用 gzip 压缩")
     p.add_argument("--stats", help="统计报告 JSON 路径（默认 <output>.stats.json）")
