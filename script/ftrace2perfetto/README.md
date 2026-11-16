@@ -284,6 +284,12 @@ ms 级，每轮 poll 都能排空队列、重开中断。实测 `irq_handler_ent
 注意：ftrace 对 `void *` 字段只打印裸 hex，需专门提取，KV_RE 解析不到 `lock_addr=`。
 napi 事件在本次采集中去掉。产物在 `langraph-qemu-perf-lab/iperf-lock-demo/`。
 
+2026-11 加密重抓（实验 7b，`iperf-lock-demo/lockbench/`）：新增 `lockbench.c` 压力源
+（16 线程 mmap_lock rwsem + pthread_mutex/futex + inode i_rwsem），把 contention 从 2 组
+放大到 2,822 组。修复两处配对 bug：① KV_RE 把 `flags=WRITE)` 的右括号吃进值，改用括号
+正则覆盖；② 锁等待配对 key 从裸 `lock_addr` 改为 `(lock_addr, tid)`——mmap_lock 是每进程
+全局一把锁，仅按地址做栈会 begin/end 交错。`contention_begin/end` 是同一线程配对。
+
 ## 12. 带调用栈标注（实验 6）
 
 新增 `tracepoint_stacks.py`：解析每个 tracepoint 后面的 `<stack trace>` / `<user stack trace>`，

@@ -606,8 +606,14 @@ class Converter:
                     self.st["pids_seen"].add(int(kv[k]))
             # 锁地址：给每把锁建一条子轨（ftrace 对 void* 打印裸 hex）
             if ev in ("contention_begin", "contention_end"):
-                ma = re.match(r"\s*([0-9A-Fa-f]{8,16})\b", d.get("rest", ""))
-                la = ma.group(1) if ma else kv.get("lock_addr")
+                rest = d.get("rest", "")
+                ma = re.match(r"\s*([0-9A-Fa-f]{8,16})\b", rest)
+                if ma:
+                    la = ma.group(1)
+                elif "____ptrval____" in rest:
+                    la = "____ptrval____"
+                else:
+                    la = kv.get("lock_addr")
                 if la:
                     self.st["lock_addrs"].add(la)
 
@@ -1022,22 +1028,32 @@ class Converter:
             #   contention_begin: 00000000ca58c639 (flags=READ)
             #   contention_end:   00000000ca58c639 (ret=0)
             rest = d.get("rest", "")
+            # 正常：裸 hex 锁地址；异常：kptr_restrict 未关时是 (____ptrval____)
             ma = re.match(r"\s*([0-9A-Fa-f]{8,16})\b", rest)
-            la = ma.group(1) if ma else (kv.get("lock_addr", "?"))
-            # 括号里的 flags / ret（值末尾可能带 ')'，去掉）
+            if ma:
+                la = ma.group(1)
+            elif "____ptrval____" in rest:
+                la = "____ptrval____"
+            else:
+                la = kv.get("lock_addr", "?")
+            # 括号里的 flags / ret：KV_RE 会把 ')' 吃进值（如 WRITE)），
+            # 这里用只认括号内容的正则覆盖（同一线程同一次竞争的 begin/end 严格配对）。
             for k, v in re.findall(r"([A-Za-z_]+)=([^\s\)]+)", rest):
-                kv.setdefault(k, v.rstrip(")"))
+                kv[k] = v
             tk = ("lock", la)
             cname = comm or self.comm_by_pid.get(pid, "")
+            # 按 (锁地址, 等待者 tid) 配对：mmap_lock 是每进程全局一把锁，
+            # 所有线程抢同一地址，仅按 la 做栈会 begin/end 交错、大量配对失败。
+            wkey = (la, pid)
             if ev == "contention_begin":
-                self.lock_wait[la].append((us, pid, cname, cpu, kv.get("flags", "")))
+                self.lock_wait[wkey].append((us, pid, cname, cpu, kv.get("flags", "")))
                 self.emit_instant(G_LOCK, tk, "lock 竞争开始", us, "lock",
                                   {"lock_addr": la, "flags": kv.get("flags", ""),
                                    "tid": pid, "comm": cname, "cpu": cpu},
                                   track_name="锁 %s" % la)
             else:
                 wait_us, wp, wc, wcpu, wflags = None, pid, cname, cpu, ""
-                stack = self.lock_wait.get(la)
+                stack = self.lock_wait.get(wkey)
                 if stack:
                     wait_us, wp, wc, wcpu, wflags = stack.pop()
                 args = {"lock_addr": la, "flags": wflags or kv.get("flags", ""),
@@ -1143,7 +1159,7 @@ class Converter:
                             track_name=cur.get("label", "") + " 状态")
             self.state_open.pop(tk, None)
         # 未配对的锁竞争：闭合到 trace 末尾，标注未结束
-        for la, stack in list(self.lock_wait.items()):
+        for (la, _wp), stack in list(self.lock_wait.items()):
             while stack:
                 wait_us, wp, wc, wcpu, wflags = stack.pop()
                 self.emit_slice(G_LOCK, ("lock", la), "等锁(未结束)：%s" % wc,
