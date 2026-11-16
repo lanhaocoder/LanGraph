@@ -136,6 +136,10 @@ def state_label(prev_state: str) -> str:
 def _vi(n: int) -> bytes:
     out = bytearray()
     n = int(n)
+    # 防御：varint 只适用于非负整数。负号值（如「未知持锁者」哨兵）按 int64
+    # 补码编码为 10 字节，避免 n>>=7 在负数上算术右移导致死循环。
+    if n < 0:
+        n += 1 << 64
     while True:
         b = n & 0x7F
         n >>= 7
@@ -346,6 +350,21 @@ class Converter:
         # 锁竞争：lock_addr -> [(ts, pid, comm, cpu, flags), ...] 等待开始栈
         self.lock_wait = defaultdict(list)
 
+        # ---- SQL 可 join 的关系字段（蓝方建议 c 方案：关系进 args，不只画箭头）----
+        # parent_ts_ns/parent_event：per-(pid,cpu) 的直接前驱，任意两事件「是否直接
+        #   相关」的通用答案；SQL: a.parent_ts_ns = b.ts 即可连成前驱边。
+        self.last_event = {}          # (pid, cpu) -> (ts_us, event_name)
+        # causal_id：一条因果链共享的 ID（复用 flow_seq 的序号；锁竞争另用 lock_seq）
+        self.lock_seq = 0
+        # lock_holder_tid：同锁地址最近「竞争结束」的等待者视为持锁者（启发式，标 inferred）
+        self.lock_last_holder = {}    # lock_addr -> tid
+        self.lock_causal = defaultdict(list)  # (lock_addr,tid) -> [causal_id] 与 lock_wait 并行
+        # 单次 emit 上下文：由 convert() 主循环在 _on_event 前 _prepare_relation() 设置，
+        # emit_slice/emit_instant/emit_flow 统一注入；_on_event 期间可追加 causal 字段。
+        self.cur_rel_args = {}
+        self.emit_seq = 0
+        self.emit_seq_mark = 0
+
     def _load_stacks(self, path):
         """加载逐条堆栈索引（tracepoint_stacks.py --events-out 产出的 JSONL）。
 
@@ -491,11 +510,42 @@ class Converter:
             if self.pw:
                 self.pw.descriptor(uuid, name, parent=self.group_uuid[grp])
 
+    # ---------------- 关系字段上下文（SQL join 基础）----------------
+    def _prepare_relation(self, d):
+        """每个 tracepoint 事件处理前调用：写入 per-(pid,cpu) 直接前驱。
+        后续 _on_event 期间可再往 self.cur_rel_args 追加 causal_id / waker 等字段。"""
+        pid, cpu, ts, ev = d["pid"], d["cpu"], d["ts"], d["event"]
+        rel = {}
+        prev = self.last_event.get((pid, cpu))
+        if prev:
+            # d["ts"] 是秒（float），trace_processor 的 slice.ts 单位是 ns。
+            # 换算成同样的 ns，SQL 里 CAST(parent_ts_ns AS INT)=slice.ts 才能精确 join。
+            rel["parent_ts_ns"] = int(prev[0] * 1e9)
+            rel["parent_event"] = prev[1]
+        self.cur_rel_args = rel
+        self.emit_seq_mark = self.emit_seq
+
+    def _commit_relation(self, d):
+        """事件处理完后：仅当本次真的 emit 了事件，才把 (pid,cpu)->事件 记为前驱，
+        保证 parent_ts_ns 一定能 join 到一个真实存在的 slice/instant。"""
+        if self.emit_seq > self.emit_seq_mark:
+            self.last_event[(d["pid"], d["cpu"])] = (d["ts"], d["event"])
+
+    def _rel_args(self, args):
+        """把关系字段注入到事件 args（在 cur_stack_args 之后、显式 args 之前，
+        显式 args 可覆盖）。"""
+        merged = dict(args or {})
+        if self.cur_stack_args:
+            merged = {**self.cur_stack_args, **merged}
+        if self.cur_rel_args:
+            merged = {**self.cur_rel_args, **merged}
+        return merged
+
     # ---------------- 统一 emit ----------------
     def emit_slice(self, group, key, name, ts, dur, cat, args, track_name=None,
                    flow=None, term_flow=None):
-        if self.cur_stack_args:
-            args = {**self.cur_stack_args, **(args or {})}
+        args = self._rel_args(args)
+        self.emit_seq += 1
         if track_name is None:
             track_name = name
         _, tid, uuid, _ = self._track_key(group, key, track_name)
@@ -508,8 +558,8 @@ class Converter:
 
     def emit_instant(self, group, key, name, ts, cat, args, track_name=None,
                      flow=None, term_flow=None):
-        if self.cur_stack_args:
-            args = {**self.cur_stack_args, **(args or {})}
+        args = self._rel_args(args)
+        self.emit_seq += 1
         if track_name is None:
             track_name = "事件"
         _, tid, uuid, _ = self._track_key(group, key, track_name)
@@ -522,8 +572,10 @@ class Converter:
     def emit_flow(self, cpu, ts, fid, name, kind, args, group=None):
         """kind: 'start' | 'step' | 'end'；group 默认 G_CPU，
         中断→软中断→唤醒 这条因果链挂在 G_IRQ 轨上。"""
-        if self.cur_stack_args:
-            args = {**self.cur_stack_args, **(args or {})}
+        args = self._rel_args(args)
+        self.emit_seq += 1
+        # causal_id 复用该 flow 的 id，写进 args 让 SQL 可把整条链的产物 join 出来
+        args.setdefault("causal_id", fid)
         if group is None:
             group = G_CPU
         if group == G_IRQ:
@@ -808,6 +860,12 @@ class Converter:
             wpid = int(kv.get("pid", pid))
             tcpu = int(kv["target_cpu"]) if kv.get("target_cpu", "").isdigit() else None
             self.comm_by_pid.setdefault(wpid, kv.get("comm", ""))
+            # 关系字段：waker=行前缀 pid（唤醒者），wakee=kv.pid（被唤醒者）。
+            # 旧实现只取 wpid、把唤醒者丢了；这里两者都写进 args → SQL 可 join 出唤醒边。
+            self.cur_rel_args["waker_tid"] = pid
+            self.cur_rel_args["wakee_tid"] = wpid
+            if tcpu is not None:
+                self.cur_rel_args["target_cpu"] = tcpu
             if self.opts.no_flow or not self._visible(wpid):
                 return
             if ev == "sched_waking":
@@ -928,6 +986,10 @@ class Converter:
             self._flush_pending_close(cpu)
             if self.causal_fid.get(cpu) is not None:
                 self._close_intr(cpu, us, "硬中断被嵌套/打断（前一条未收尾）")
+            # 中断嵌套深度与父中断时间戳：irq_open 栈里剩下的就是被打断的父中断
+            self.cur_rel_args["irq_depth"] = len(self.irq_open[cpu]) + 1
+            if self.irq_open[cpu]:
+                self.cur_rel_args["parent_irq_ts_ns"] = int(self.irq_open[cpu][-1]["ts"] * 1000)
             self.flow_seq += 1
             fid = self.flow_seq
             self.causal_fid[cpu] = fid
@@ -1045,20 +1107,40 @@ class Converter:
             # 按 (锁地址, 等待者 tid) 配对：mmap_lock 是每进程全局一把锁，
             # 所有线程抢同一地址，仅按 la 做栈会 begin/end 交错、大量配对失败。
             wkey = (la, pid)
+            # 同锁地址最近一次「竞争结束」的等待者 → 推断为当前持锁者（无 owner tracepoint，
+            # demo 阶段只能推断，标 inferred=1）。SQL 可据此把「等同一把锁」的事件连起来。
+            holder = self.lock_last_holder.get(la)
             if ev == "contention_begin":
+                self.lock_seq += 1
+                lid = self.lock_seq
+                self.lock_causal[wkey].append(lid)
+                self.cur_rel_args["causal_id"] = lid
+                # 未知持锁者写 None（annotation 会跳过 → SQL 里为 NULL），不用 -1 哨兵
+                self.cur_rel_args["lock_holder_tid"] = holder
+                self.cur_rel_args["lock_holder_inferred"] = 1
                 self.lock_wait[wkey].append((us, pid, cname, cpu, kv.get("flags", "")))
                 self.emit_instant(G_LOCK, tk, "lock 竞争开始", us, "lock",
                                   {"lock_addr": la, "flags": kv.get("flags", ""),
-                                   "tid": pid, "comm": cname, "cpu": cpu},
+                                   "tid": pid, "comm": cname, "cpu": cpu,
+                                   "lock_holder_tid": holder,
+                                   "lock_holder_inferred": 1},
                                   track_name="锁 %s" % la)
             else:
                 wait_us, wp, wc, wcpu, wflags = None, pid, cname, cpu, ""
                 stack = self.lock_wait.get(wkey)
                 if stack:
                     wait_us, wp, wc, wcpu, wflags = stack.pop()
+                cs = self.lock_causal.get(wkey)
+                lid = cs.pop() if cs else None
+                if lid is not None:
+                    self.cur_rel_args["causal_id"] = lid
+                # 本次竞争结束者的 tid → 记为这把锁的（推断）持锁者，供后续 begin 关联
+                if wp is not None:
+                    self.lock_last_holder[la] = wp
                 args = {"lock_addr": la, "flags": wflags or kv.get("flags", ""),
                         "ret": kv.get("ret", ""), "tid": wp, "comm": wc,
-                        "waiter_cpu": wcpu, "end_cpu": cpu}
+                        "waiter_cpu": wcpu, "end_cpu": cpu,
+                        "lock_holder_tid": wp, "lock_holder_inferred": 1}
                 if wait_us is not None:
                     args["wait_us"] = round(us - wait_us, 3)
                     self.emit_slice(G_LOCK, tk, "等锁：%s" % wc, wait_us, us - wait_us,
@@ -1144,8 +1226,12 @@ class Converter:
 
         for d in self._iter():
             self.cur_stack_args = self._stack_args(d)
+            self._prepare_relation(d)
             self._on_event(d)
+            self._commit_relation(d)
             self.cur_stack_args = {}
+        # 收尾阶段不属于单个 tracepoint 事件，清空关系上下文，避免误挂前驱/causal
+        self.cur_rel_args = {}
 
         # 收尾：把所有打开的 slice 关到 tmax
         t_end = (self.opts.end * 1e6) if self.opts.end is not None else self.st["tmax"] * 1e6

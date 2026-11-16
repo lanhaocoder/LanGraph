@@ -169,6 +169,71 @@ WHERE name LIKE '%wakeup%' OR name LIKE 'sched_waking%' ORDER BY ts LIMIT 20;
 > 参数 key 前缀是 `debug.`；Chrome JSON 里 track 名可能为空（需用 `thread_track / thread` join），
 > 参数 key 前缀是 `args.`。上面用 `LIKE '%xxx'` 兼容两者。
 
+### 6.1 关系字段：用 SQL join 分析任意事件关系（推荐）
+
+**背景**：flow 箭头是按「同 CPU + 时间窗」猜的展示层，不适合当分析基础
+（全量里有一部分箭头终点是 `(trace start)` / 未唤醒等合成事件）。
+真正的因果关系**写进了每个事件的 args**，可以直接 SQL join，不依赖 UI 里箭头是否可见。
+
+关系字段（都在 `args` 表，key 带 `debug.` 前缀）：
+
+| 字段 | 含义 | 怎么 join |
+|---|---|---|
+| `causal_id` | 因果链 ID，一条链上所有事件共享 | `WHERE a.int_value=b.int_value` 取同链全部事件 |
+| `parent_ts_ns` + `parent_event` | 直接前驱事件的时间戳(ns)/名字 | `CAST(a.int_value AS INT)=b.ts` 连成前驱边 |
+| `waker_tid` / `wakee_tid` | 唤醒者(行前缀 pid) / 被唤醒者(kv.pid) | 按 tid 关联唤醒双方 |
+| `irq_depth` / `parent_irq_ts_ns` | 中断嵌套深度 / 父中断时间戳 | 深度>1 即嵌套，时间戳指向父中断 |
+| `lock_holder_tid` / `lock_holder_inferred` | 同锁地址最近持锁者（启发式推断，inferred=1） | 按 `lock_addr` 关联等锁事件 |
+
+这些字段**不新增任何 tracepoint、不用重抓**，只在转换时多写 annotation。
+验证脚本 `relations_check.py` 实测这些边能被 SQL join 命中。
+
+```sql
+-- ① 直接前驱边：a.parent_ts_ns 精确命中某个 b.ts
+SELECT count(*) FROM slice a
+JOIN args aa ON a.arg_set_id=aa.arg_set_id AND aa.key='debug.parent_ts_ns'
+JOIN slice b ON CAST(aa.int_value AS INT)=b.ts;
+
+-- ② 展开一条因果链上的所有事件（选事件数最多的一条链）
+WITH chains AS (
+  SELECT int_value cid FROM args WHERE key='debug.causal_id'
+  GROUP BY int_value ORDER BY count(*) DESC LIMIT 1)
+SELECT s.ts, s.name,
+       a1.int_value AS causal_id,
+       a2.string_value AS parent_event
+FROM slice s
+JOIN args a1 ON s.arg_set_id=a1.arg_set_id AND a1.key='debug.causal_id'
+JOIN args a2 ON s.arg_set_id=a2.arg_set_id AND a2.key='debug.parent_event'
+WHERE a1.int_value=(SELECT cid FROM chains)
+ORDER BY s.ts;
+
+-- ③ 唤醒边：谁唤醒了谁
+SELECT s.ts, s.name,
+       (SELECT int_value FROM args WHERE arg_set_id=s.arg_set_id AND key='debug.waker_tid') waker,
+       (SELECT int_value FROM args WHERE arg_set_id=s.arg_set_id AND key='debug.wakee_tid') wakee
+FROM slice s
+WHERE s.arg_set_id IN (SELECT arg_set_id FROM args WHERE key='debug.waker_tid')
+ORDER BY s.ts LIMIT 20;
+
+-- ④ 推断持锁者：等同一把锁的事件关联到最近持锁者
+SELECT s.name, s.ts,
+       (SELECT int_value FROM args WHERE arg_set_id=s.arg_set_id AND key='debug.lock_addr') lock_addr,
+       (SELECT int_value FROM args WHERE arg_set_id=s.arg_set_id AND key='debug.lock_holder_tid') holder
+FROM slice s
+WHERE s.arg_set_id IN (SELECT arg_set_id FROM args WHERE key='debug.lock_holder_inferred')
+ORDER BY s.ts LIMIT 20;
+```
+
+> 注意：`extract_arg()` 在部分 trace_processor 版本对 debug annotation 返回 NULL，
+> 上面统一用 `JOIN args ON arg_set_id` 取字段，稳定可靠。首次竞争时无已知持锁者，
+> 该事件的 `lock_holder_tid` annotation 缺省（SQL 里为 NULL）。持锁者是启发式推断，
+> 标 `inferred=1`，仅用于 demo 关联，不代表内核真实 owner。
+
+验证：
+```bash
+python3 relations_check.py path/to/lock-rel-full.pftrace -o relations-report.json
+```
+
 ---
 
 ## 7. 校验结果（官方 `trace_processor_shell v59.1`）
