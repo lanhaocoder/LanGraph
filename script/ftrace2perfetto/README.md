@@ -274,6 +274,16 @@ ms 级，每轮 poll 都能排空队列、重开中断。实测 `irq_handler_ent
 
 ---
 
+## 12.1 锁 / 同步事件关联（实验 7）
+
+`WANTED` 增加 `lock:contention_begin/end`、`rcu:*`、`workqueue:*`、`timer:*`、`signal:*`；
+新增 `G_LOCK=5`「锁 / 同步事件轨」分组（每把 `lock_addr` 一条子轨 + Rcu/Timer/Workqueue/Signal 子轨）。
+`contention_begin/end` 按裸 hex 锁地址配对成「等锁」slice，args 带 `lock_addr`/`flags`/`ret`/
+`wait_us`/`waiter_cpu`/`comm`/`tid` 与调用栈（起始帧 `rwsem_down_read_slowpath`）。
+实测抓到 2 组 rwsem 竞争（READ 读锁慢路径 909 µs、SPIN|WRITE 46 µs）、RCU 166K、timer 335K。
+注意：ftrace 对 `void *` 字段只打印裸 hex，需专门提取，KV_RE 解析不到 `lock_addr=`。
+napi 事件在本次采集中去掉。产物在 `langraph-qemu-perf-lab/iperf-lock-demo/`。
+
 ## 12. 带调用栈标注（实验 6）
 
 新增 `tracepoint_stacks.py`：解析每个 tracepoint 后面的 `<stack trace>` / `<user stack trace>`，

@@ -85,15 +85,22 @@ WANTED = {
     "softirq_raise", "softirq_entry", "softirq_exit",
     "napi_poll",
     "tasklet_entry", "tasklet_exit",
+    # 锁 / 同步 / 内核异步执行（demo 用；napi 已移除）
+    "contention_begin", "contention_end",
+    "rcu_utilization", "rcu_stall_warning",
+    "workqueue_queue_work", "workqueue_execute_start", "workqueue_execute_end",
+    "signal_generate", "timer_expire_entry", "timer_expire_exit",
+    "hrtimer_expire_entry", "hrtimer_expire_exit",
 }
 
 # Track 分组（Chrome JSON 的 pid；原生 proto 里是 parent track）
-G_CPU, G_STATE, G_IRQ, G_LIFE = 1, 2, 3, 4
+G_CPU, G_STATE, G_IRQ, G_LIFE, G_LOCK = 1, 2, 3, 4, 5
 GROUP_NAMES = {
     G_CPU: "CPU 运行泳道",
     G_STATE: "线程状态轨（按 tid）",
     G_IRQ: "IRQ / softirq 轨",
     G_LIFE: "进程生命周期事件",
+    G_LOCK: "锁 / 同步事件轨",
 }
 
 STATE_NAME = {
@@ -317,7 +324,7 @@ class Converter:
             "tmin": None, "tmax": None,
             "wake2run_us": [], "flow_matched": 0, "flow_total": 0,
             "focus_tids": set(), "life": defaultdict(set),
-            "pids_seen": set(), "cpus_seen": set(),
+            "pids_seen": set(), "cpus_seen": set(), "lock_addrs": set(),
         }
         # pass2 运行状态
         self.cpu_running = {}       # cpu -> dict
@@ -336,6 +343,8 @@ class Converter:
         # sched_waking 常发生在软中断退出之后几十~几百 µs（尤其 TCG 下），
         # 立即 end 会把「硬中断→上CPU」链拦腰截断。挂起窗口内若有唤醒则复活该流。
         self.pending_close = {}       # cpu -> (fid, ts_us, vec)
+        # 锁竞争：lock_addr -> [(ts, pid, comm, cpu, flags), ...] 等待开始栈
+        self.lock_wait = defaultdict(list)
 
     def _load_stacks(self, path):
         """加载逐条堆栈索引（tracepoint_stacks.py --events-out 产出的 JSONL）。
@@ -465,8 +474,8 @@ class Converter:
             self._track_key(G_LIFE, key, label + " 生命周期")
 
     def _emit_descriptors(self):
-        # 先建 4 个 parent track（原生 proto 的层级）
-        for g in (G_CPU, G_STATE, G_IRQ, G_LIFE):
+        # 先建 5 个 parent track（原生 proto 的层级）
+        for g in (G_CPU, G_STATE, G_IRQ, G_LIFE, G_LOCK):
             u = self.next_uuid
             self.next_uuid += 1
             self.group_uuid[g] = u
@@ -595,6 +604,12 @@ class Converter:
             for k in ("pid", "child_pid", "next_pid"):
                 if k in kv and kv[k].isdigit():
                     self.st["pids_seen"].add(int(kv[k]))
+            # 锁地址：给每把锁建一条子轨（ftrace 对 void* 打印裸 hex）
+            if ev in ("contention_begin", "contention_end"):
+                ma = re.match(r"\s*([0-9A-Fa-f]{8,16})\b", d.get("rest", ""))
+                la = ma.group(1) if ma else kv.get("lock_addr")
+                if la:
+                    self.st["lock_addrs"].add(la)
 
         # 注册 track
         for c in sorted(self.st["cpus_seen"]):
@@ -614,6 +629,12 @@ class Converter:
             else:
                 comm = self.comm_by_pid.get(p, "")
                 self._register_thread_tracks(("task", p), comm, None, p)
+        # 锁 / 同步轨：每条 lock_addr 一条子轨（一把锁的多个等待者能同轨对比）
+        for a in sorted(self.st.get("lock_addrs", [])):
+            self._track_key(G_LOCK, ("lock", a), "锁 %s" % a)
+        for k in ("rcu", "workqueue", "signal", "timer"):
+            self._track_key(G_LOCK, (k, "all"), "%s 事件" % k.capitalize())
+
         if not self.opts.no_flow:
             # flow 挂在 CPU / IRQ track 上，已注册
             pass
@@ -995,6 +1016,75 @@ class Converter:
             self._irq_pop(cpu, us, match="tasklet")
             return
 
+        # ---------- 锁 / 同步 / 内核异步事件（demo：事件关联） ----------
+        if ev in ("contention_begin", "contention_end"):
+            # ftrace 对 void* 字段只打印裸 hex（无 key=），flags/ret 在括号里：
+            #   contention_begin: 00000000ca58c639 (flags=READ)
+            #   contention_end:   00000000ca58c639 (ret=0)
+            rest = d.get("rest", "")
+            ma = re.match(r"\s*([0-9A-Fa-f]{8,16})\b", rest)
+            la = ma.group(1) if ma else (kv.get("lock_addr", "?"))
+            # 括号里的 flags / ret（值末尾可能带 ')'，去掉）
+            for k, v in re.findall(r"([A-Za-z_]+)=([^\s\)]+)", rest):
+                kv.setdefault(k, v.rstrip(")"))
+            tk = ("lock", la)
+            cname = comm or self.comm_by_pid.get(pid, "")
+            if ev == "contention_begin":
+                self.lock_wait[la].append((us, pid, cname, cpu, kv.get("flags", "")))
+                self.emit_instant(G_LOCK, tk, "lock 竞争开始", us, "lock",
+                                  {"lock_addr": la, "flags": kv.get("flags", ""),
+                                   "tid": pid, "comm": cname, "cpu": cpu},
+                                  track_name="锁 %s" % la)
+            else:
+                wait_us, wp, wc, wcpu, wflags = None, pid, cname, cpu, ""
+                stack = self.lock_wait.get(la)
+                if stack:
+                    wait_us, wp, wc, wcpu, wflags = stack.pop()
+                args = {"lock_addr": la, "flags": wflags or kv.get("flags", ""),
+                        "ret": kv.get("ret", ""), "tid": wp, "comm": wc,
+                        "waiter_cpu": wcpu, "end_cpu": cpu}
+                if wait_us is not None:
+                    args["wait_us"] = round(us - wait_us, 3)
+                    self.emit_slice(G_LOCK, tk, "等锁：%s" % wc, wait_us, us - wait_us,
+                                    "lock", args, track_name="锁 %s" % la)
+                else:
+                    self.emit_instant(G_LOCK, tk, "lock 竞争结束(未配对)", us, "lock",
+                                      args, track_name="锁 %s" % la)
+            return
+        if ev in ("rcu_utilization", "rcu_stall_warning"):
+            # rcu_utilization 只有自由文本（如 "Start scheduler-tick"），不是 kv
+            rstate = kv.get("s", "") or d.get("rest", "").strip()
+            self.emit_instant(G_LOCK, ("rcu", "all"),
+                              "rcu: %s" % (rstate or ev), us, "rcu",
+                              {"event": ev, "state": rstate, "tid": pid,
+                               "comm": comm or self.comm_by_pid.get(pid, "")},
+                              track_name="Rcu 事件")
+            return
+        if ev in ("workqueue_queue_work", "workqueue_execute_start", "workqueue_execute_end"):
+            self.emit_instant(G_LOCK, ("workqueue", "all"), ev, us, "workqueue",
+                              {"event": ev, "workqueue": kv.get("workqueue", ""),
+                               "function": kv.get("function", ""),
+                               "req_cpu": kv.get("req_cpu", ""), "cpu": kv.get("cpu", ""),
+                               "tid": pid, "comm": comm or self.comm_by_pid.get(pid, "")},
+                              track_name="Workqueue 事件")
+            return
+        if ev == "signal_generate":
+            self.emit_instant(G_LOCK, ("signal", "all"),
+                              "signal %s -> %s:%s" % (kv.get("sig", "?"),
+                                                      kv.get("comm", "?"), kv.get("pid", "?")),
+                              us, "signal",
+                              {"sig": kv.get("sig", ""), "target_pid": kv.get("pid", ""),
+                               "target_comm": kv.get("comm", ""), "sender_tid": pid,
+                               "comm": comm or self.comm_by_pid.get(pid, "")},
+                              track_name="Signal 事件")
+            return
+        if ev in ("timer_expire_entry", "timer_expire_exit", "hrtimer_expire_entry", "hrtimer_expire_exit"):
+            self.emit_instant(G_LOCK, ("timer", "all"), ev, us, "timer",
+                              {"event": ev, "function": kv.get("function", ""),
+                               "tid": pid, "comm": comm or self.comm_by_pid.get(pid, "")},
+                              track_name="Timer 事件")
+            return
+
     def convert(self):
         # 输出文件
         fmt = self.opts.format
@@ -1052,6 +1142,15 @@ class Converter:
                             {"comm": cur.get("comm", ""), "note": "trace_end"},
                             track_name=cur.get("label", "") + " 状态")
             self.state_open.pop(tk, None)
+        # 未配对的锁竞争：闭合到 trace 末尾，标注未结束
+        for la, stack in list(self.lock_wait.items()):
+            while stack:
+                wait_us, wp, wc, wcpu, wflags = stack.pop()
+                self.emit_slice(G_LOCK, ("lock", la), "等锁(未结束)：%s" % wc,
+                                wait_us, max(0.0, t_end - wait_us), "lock",
+                                {"lock_addr": la, "flags": wflags, "tid": wp,
+                                 "comm": wc, "waiter_cpu": wcpu, "note": "trace_end"},
+                                track_name="锁 %s" % la)
         for cpu in list(self.irq_open):
             while self.irq_open[cpu]:
                 self._irq_pop(cpu, t_end)
